@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# nsplit-ufw add|del [profile] : (internal helper) add/remove ONLY nsplit's own `ufw route` rules (one per veth x uplink).
+# `del` names each rule exactly, so unrelated ufw rules are never matched. Both are idempotent.
+# `del` does not trust ufw's exit status: after each deletion it reads ufw's persistent rule file and succeeds only when the
+# rule is positively ABSENT (already absent = success). A rule still there, or a rule file that cannot be read, is a failure.
+set -uo pipefail
+ETC=${NSPLIT_ETC:-/etc/nsplit}; PROF=$ETC/profiles; RULES=${NSPLIT_UFW_RULES:-/etc/ufw/user.rules}
+# shellcheck disable=SC1091
+. "$ETC/nsplit.conf"
+# owned <vh> <uplink> <ip>: prints how many exact copies of that route rule are in the rules file; non-zero if the file could not be read
+owned() { [ -f "$RULES" ] && [ -r "$RULES" ] || return 2; awk -v t="### tuple ### route:allow any any 0.0.0.0/0 any $3 in_$1!out_$2" \
+	'index($0,t)==1 && (length($0)==length(t) || substr($0,length(t)+1,1)==" ") {c++} END{print c+0}' < "$RULES"; }
+command -v ufw >/dev/null 2>&1 || { echo "nsplit-ufw: ufw is not installed; no route rules needed"; exit 0; }
+# ufw is only in the way while it is active (its forward policy drops routed traffic). An inactive ufw gets no rules; `del` still runs, so rules from an earlier active period are removed.
+if [ "${1:-}" = add ] && ! ufw status 2>/dev/null | grep -q '^Status: active'; then echo "nsplit-ufw: ufw is not active; no route rules added (run 'nsplit reload' after activating it)"; exit 0; fi
+rc=0; only=${2:-}
+for f in "$PROF"/*.env; do
+	[ -e "$f" ] || continue
+	n=$(basename "${f%.env}"); [ -z "$only" ] || [ "$only" = "$n" ] || continue; vh=$(. "$f"; printf %s "$VH"); nip=$(. "$f"; printf %s "$NS_IP")
+	for u in $UPLINKS; do
+		case "${1:?add|del}" in
+			add) ufw route allow in on "$vh" out on "$u" from "$nip" comment "nsplit $n" >/dev/null || rc=1 ;;
+			del) ufw route delete allow in on "$vh" out on "$u" from "$nip" >/dev/null 2>&1   # status deliberately ignored: absence is read back below
+			     left=$(owned "$vh" "$u" "$nip") || { echo "nsplit-ufw: cannot read $RULES; cannot confirm the rule for $vh -> $u is gone" >&2; rc=1; continue; }
+			     [ "$left" = 0 ] || { echo "nsplit-ufw: rule 'route allow in on $vh out on $u from $nip' is STILL in $RULES after the delete (retry: nsplit-ufw del)" >&2; rc=1; } ;;
+		esac
+	done
+done
+exit $rc

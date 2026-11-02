@@ -1,0 +1,28 @@
+[Unit]
+Description=OpenSSH for profile %i INSIDE netns-%i (own config + host key; AllowUsers the profile's user; no root login)
+ConditionPathExists=/etc/nsplit/ssh/%i/sshd_config
+# Same rule as the profile's Tailscale daemon: never runs without the namespace AND the host firewall, stops before them.
+# It also needs the daemon's runtime dir (bound to /run/tailscale below) so the `tailscale` CLI inside a session talks to HIS daemon.
+Requires=nsplit-netns@%i.service nsplit-firewall.service nsplit-tailscaled@%i.service
+# (no BindsTo= on the tailscaled: if it crashes and auto-restarts, sshd must come back with it, not stay dead)
+BindsTo=nsplit-netns@%i.service nsplit-firewall.service
+After=nsplit-netns@%i.service nsplit-firewall.service nsplit-tailscaled@%i.service
+
+[Service]
+Type=notify
+# Every login session sshd forks inherits BOTH the network namespace and this mount view. (systemd --user services started by the user manager do not:
+# that is what the user@ placement drop-in is for.)
+NetworkNamespacePath=/run/netns/netns-%i
+BindReadOnlyPaths=/etc/netns/netns-%i/resolv.conf:/etc/resolv.conf
+InaccessiblePaths=-/run/systemd/resolve -/var/lib/tailscale
+BindPaths=/run/tailscale-%i:/run/tailscale
+RuntimeDirectory=nsplit-sshd-%i
+RuntimeDirectoryMode=0755
+ExecStartPre=/usr/bin/sshd -t -f /etc/nsplit/ssh/%i/sshd_config
+ExecStart=/usr/bin/sshd -D -e -f /etc/nsplit/ssh/%i/sshd_config
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,67 @@
+#!/bin/sh
+# nsplit-pam-gate : pam_exec SESSION gate. Installed by the nsplit package; wired in by `nsplit add` into the session stack of the graphical login (plasmalogin) and the console login
+# (login), AFTER the include that carries pam_systemd, and ONLY for the gated users (the PAM line before it skips this module for everyone else).
+# Why: pam_systemd is `optional` in system-login, so when a profile user's manager cannot start (namespace down), the login used to carry on and start the desktop in the HOST network.
+# This refuses the session unless the user's USER MANAGER is genuinely running and inside the profile's namespace. It checks, from the kernel's view of the manager process (not from a
+# state string alone): unit active + MainPID > 1 | the process's executable is the systemd binary | its real uid is the gated uid | it is in that user's user@UID.service cgroup | its
+# network namespace is the SAME kernel object as /run/netns/<ns>. Anything unreadable or different = refuse.
+# CONSOLE HAND-BACK: after a refusal under the graphical login, plasmalogin asks for a switch to the user's VT at the same instant logind removes the greeter session that owns the current
+# VT; the kernel's switch request then reaches logind with no session to ask ("Received VT_PROCESS signal without a registered session"), its acknowledgement fails and the switch is lost,
+# leaving the screen on an empty VT. A second switch after things settle works (it is what `chvt` does). On a refusal from the service plasmalogin only, a detached job switches the console,
+# VT_DELAY seconds later, to the lowest VT of a real graphical user session on seat0; with none it does nothing. It never starts or activates a session.
+# SCOPE: the gate decides about MANAGER placement only. A console or host-sshd login that passes it still runs its own shell in the HOST namespace (only the user manager is placed); that
+# is contained by the uid guard's egress rules, not by this gate. Other login paths (su, sudo, ssh, other display managers) do not run this gate.
+# Constants (a test copy substitutes exactly these ten lines; nothing here reads the environment, so a login environment cannot redirect the check):
+SYSTEMCTL=/usr/bin/systemctl
+PROC=/proc
+NSDIR=/run/netns
+TRIES=20                # polls (0.5 s each) while his manager is ACTIVATING (a start in progress)
+TRIES_IDLE=4            # polls while it is inactive/failed (nothing is starting: a long wait only freezes the password screen)
+LOGINCTL=/usr/bin/loginctl
+CHVT=/usr/bin/chvt
+VT_DELAY=3              # seconds after a refusal before the console is handed back (plasmalogin must finish removing its greeter first)
+VT_ACTIVE=/sys/class/tty/tty0/active   # the kernel's active VT, read to confirm the switch happened
+VT_RETRY=1              # seconds to wait before checking, and between up to 3 attempts
+MGR_EXE=/usr/lib/systemd/systemd
+# usage (from pam_exec): nsplit-pam-gate USER UID NAMESPACE
+gate_user=$1; gate_uid=$2; ns=$3
+[ "${PAM_TYPE:-}" = open_session ] || exit 0          # closing a session is never blocked
+[ -n "$gate_user" ] && [ -n "$gate_uid" ] && [ -n "$ns" ] || { logger -t nsplit-pam-gate "misconfigured (user/uid/namespace missing): refusing"; printf 'nsplit: this login was refused: the login gate is misconfigured. An administrator can check it with: nsplit status\n'; exit 1; }
+[ "${PAM_USER:-}" = "$gate_user" ] || exit 0          # defence in depth: other users are never touched
+restore_vt() {
+	[ "${PAM_SERVICE:-}" = plasmalogin ] || return 0
+	best=""
+	for id in $("$LOGINCTL" list-sessions --no-legend 2>/dev/null | awk '$4=="seat0"{print $1}'); do
+		cls=""; typ=""; vt=""
+		for kv in $("$LOGINCTL" show-session "$id" -p Class -p Type -p VTNr 2>/dev/null); do
+			case "$kv" in Class=*) cls=${kv#Class=};; Type=*) typ=${kv#Type=};; VTNr=*) vt=${kv#VTNr=};; esac
+		done
+		[ "$cls" = user ] || continue
+		case "$typ" in wayland|x11) ;; *) continue;; esac
+		case "$vt" in ""|0|*[!0-9]*) continue;; esac
+		if [ -z "$best" ] || [ "$vt" -lt "$best" ]; then best=$vt; fi
+	done
+	[ -n "$best" ] || return 0
+	logger -t nsplit-pam-gate "handing the console back to VT $best in $VT_DELAY s"
+	( setsid sh -c 'sleep "$1"; for a in 1 2 3; do "$2" "$3"; sleep "$5"; [ "$(cat "$4" 2>/dev/null)" = "tty$3" ] && exit 0; done' sh "$VT_DELAY" "$CHVT" "$best" "$VT_ACTIVE" "$VT_RETRY" </dev/null >/dev/null 2>&1 & )
+}
+# tell_refused: the one thing a refused user is told. pam_exec passes this stdout on to the login program (the line carries `stdout`), and a console login prints it before its own generic
+# "System error" (that is all it showed before). It is a fixed text: the detail (pids, namespaces) stays in the log. The graphical login shows no PAM text after a failed session: its screen just
+# resets, so there the reason is in the log and in `nsplit status`.
+tell_refused() { printf 'nsplit: this login was refused because your own network is not ready (it would have run on this computer'"'"'s network instead).\nnsplit: an administrator can check it with: nsplit status %s\n' "${ns#netns-}"; }
+refuse() { logger -t nsplit-pam-gate "REFUSED $gate_user: $*"; tell_refused; restore_vt; exit 1; }
+unit=user@$gate_uid.service; i=0
+while :; do
+	st=$("$SYSTEMCTL" is-active "$unit" 2>/dev/null); mp=$("$SYSTEMCTL" show -p MainPID --value "$unit" 2>/dev/null)
+	[ "$st" = active ] && [ "${mp:-0}" -gt 1 ] 2>/dev/null && break
+	i=$((i+1)); lim=$TRIES_IDLE; [ "$st" = activating ] && lim=$TRIES
+	[ "$i" -ge "$lim" ] && refuse "$unit is '$st' (main pid '${mp:-}'): his session would run in the host network"
+	sleep 0.5
+done
+exe=$(readlink "$PROC/$mp/exe" 2>/dev/null); exe=${exe% (deleted)}   # a manager started before a systemd upgrade still runs the replaced binary
+[ "$exe" = "$MGR_EXE" ] || refuse "main pid $mp of $unit runs '${exe:-unreadable}', not $MGR_EXE"
+uid=$(awk '/^Uid:/{print $2; exit}' "$PROC/$mp/status" 2>/dev/null); [ "$uid" = "$gate_uid" ] || refuse "main pid $mp of $unit has uid '${uid:-unreadable}', not $gate_uid"
+grep -q "/$unit" "$PROC/$mp/cgroup" 2>/dev/null || refuse "main pid $mp is not in the cgroup of $unit"
+mine=$(stat -L -c %d:%i "$PROC/$mp/ns/net" 2>/dev/null); ref=$(stat -L -c %d:%i "$NSDIR/$ns" 2>/dev/null)
+[ -n "$mine" ] && [ -n "$ref" ] && [ "$mine" = "$ref" ] || refuse "$unit (pid $mp) is not in $ns (its namespace '${mine:-unreadable}', $ns '${ref:-unreadable}')"
+exit 0

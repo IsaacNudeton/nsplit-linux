@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# nsplit: per-profile Tailscale networking for shared Linux computers.
+# Each selected user gets their own network namespace and their own Tailscale node, so a shared machine can be on several people's tailnets at once,
+# one per profile, with their own DNS and ports. See `nsplit help` for the commands.
+set -uo pipefail
+SELF=$(readlink -f "$0"); ARGV=("$@")
+ROOT=$(dirname "$(dirname "$SELF")")
+LIB=${NSPLIT_LIB:-$ROOT/lib/nsplit}; SHARE=${NSPLIT_SHARE:-$ROOT/share/nsplit}
+# shellcheck source=../lib/nsplit/common.sh
+. "$LIB/common.sh"
+for f in cmd-dns cmd-add cmd-login cmd-status cmd-ops; do
+	# shellcheck disable=SC1090
+	. "$LIB/$f.sh"
+done
+
+usage() { cat <<'EOT'
+nsplit: your profile, your network.
+
+  nsplit add USER        set up networking for an existing user: their own namespace and Tailscale node (preview with --dry-run)
+  nsplit login [PROFILE] sign that profile's node in to the user's own Tailscale account (prints a link to approve)
+  nsplit status [-v]     what is true now for every profile, and what needs attention
+  nsplit start | stop    start or stop a profile's managed networking now (PROFILE or --all)
+  nsplit remove PROFILE  take the configuration away again (never touches the account or its files)
+  nsplit uplinks         show or set which physical interfaces profile traffic may leave through
+  nsplit reload          re-apply the firewall rules and forwarding (after changing uplinks)
+  nsplit ts PROFILE ...  run the tailscale command against a profile's node
+  nsplit run PROFILE -- COMMAND...   run a command inside a profile's network as that user
+
+Installing nsplit changes nothing on the machine; `nsplit add` does, and shows what first. Every command has --help.
+EOT
+}
+
+cmd=${1:-help}; [ $# -gt 0 ] && shift
+case $cmd in
+	add) cmd_add "$@";;
+	login) cmd_login "$@";;
+	status) cmd_status "$@";;
+	start) cmd_start "$@";;
+	stop) cmd_stop "$@";;
+	remove) cmd_remove "$@";;
+	uplinks) cmd_uplinks "$@";;
+	reload) cmd_reload "$@";;
+	run) cmd_run "$@";;
+	ts) cmd_ts "$@";;
+	version|--version|-V) echo "nsplit $NSPLIT_VERSION";;
+	help|--help|-h) usage;;
+	*) printf 'nsplit: unknown command %s\n\n' "$cmd" >&2; usage >&2; exit 2;;
+esac

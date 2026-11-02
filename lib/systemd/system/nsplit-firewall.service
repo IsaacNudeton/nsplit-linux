@@ -1,0 +1,18 @@
+[Unit]
+Description=nsplit host firewall + scoped forwarding + NAT for the profile namespaces
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=@LIBDIR@/nsplit-fw up
+# `systemctl reload nsplit-firewall` re-applies the rules and the forwarding flags without killing anything (the Wi-Fi hook uses it)
+ExecReload=@LIBDIR@/nsplit-fw up
+# Login sessions are NOT in the daemons' cgroups (pam_systemd scopes), so stopping the daemons does not end them: kill whatever is still inside the
+# namespaces BEFORE the filter is removed.
+ExecStopPost=-@LIBDIR@/nsplit-fw kill-sessions
+# ExecStopPost (not ExecStop): it ALSO runs when ExecStart fails half-way, so a failed start cleans up after itself. It is idempotent and only removes
+# nsplit's own tables and restores the forwarding flags nsplit recorded.
+ExecStopPost=@LIBDIR@/nsplit-fw down
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,106 @@
+#!/bin/bash -p
+# nsplit-sockdir PROFILE [check]   (internal helper: run as root by nsplit-tailscaled@PROFILE.service BEFORE the daemon starts, and by `nsplit start`; `check` is read-only and works for any user)
+# The profile's Tailscale daemon keeps its control socket in /run/tailscale-PROFILE/. The daemon makes the socket itself world-writable (0666) and Unix sockets ignore network namespaces, so with a
+# world-searchable directory any local user could ask ANY profile's daemon for its node, its tailnet account's short login name, its health messages and its preferences. Connecting to a socket
+# needs search (x) permission on every directory of the path. The directory ACL and Linux's hard-link protection together provide the control. The directory is made:
+#     owner root, group root, mode 0710: user::rwx, user:<owner uid>:--x, group::---, mask::--x, other::---
+# i.e. root keeps full control (only root can create, rename, replace or delete the socket; nobody else can list the directory) and the owner may traverse it and connect, nothing more: no read,
+# no write and no way to replace the socket or change its ACL. Other users are refused through names for this directory: the check is on the
+# directory object, so bind mounts of it (/run/tailscale inside the owner's session, the daemon's own view) and /proc/PID/root aliases are refused the same way. The unit creates the directory
+# 0710 itself (RuntimeDirectoryMode, re-applied before each Exec* command). Its group bits must match the final ACL mask so systemd preserves the owner's entry.
+# This helper removes owning-group access, grants the named owner's entry and verifies the whole result before the daemon is allowed to listen. Group 0 then receives no access.
+# fs.protected_hardlinks must be 1 before launch and must STAY enabled: otherwise an owner could link the root-owned 0666 socket into a writable directory outside this ACL. This helper only reads
+# the setting; it never changes machine policy. Check mode also rejects a socket with multiple hard links. Restoring the setting does not revoke old links or clients; use a managed daemon restart.
+# A link count of 1 cannot reveal clients opened through a link that was later removed. After known prior exposure, an administrator must explicitly restart the affected daemon even if check passes.
+# Set mode prepares the directory before systemd starts the daemon; it allows a stale root-owned real socket, including one with other links, and NEVER unlinks it. The daemon replaces its stopped
+# predecessor's canonical socket when it starts. Only that managed listener replacement revokes old clients/aliases; running this helper on a live daemon does not do so.
+# It is idempotent: run on a directory left over from an older version (0755, no ACL) it tightens it, and it removes any other entry it finds.
+#   exit 0 = directory prepared, or check passed now;  1 = unsafe / could not be prepared;  2 = required observation unavailable or malformed;  3 = no such directory (check mode)
+# Nothing here reads the caller's environment, except for off-host tests: NSPLIT_TEST with NSPLIT_ETC / NSPLIT_TS_RUN are honoured ONLY when the process is not root.
+builtin unset -f $(builtin compgen -A function) 2>/dev/null
+PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+set -uo pipefail
+umask 022
+ETC=/etc/nsplit; TSRUN=/run; TESTMODE=
+if [ "$(id -u)" != 0 ] && [ -n "${NSPLIT_TEST:-}" ]; then TESTMODE=1; ETC=${NSPLIT_ETC:-$ETC}; TSRUN=${NSPLIT_TS_RUN:-$TSRUN}; fi
+fail() { printf 'nsplit-sockdir: %s\n' "$*" >&2; exit 1; }
+[ $# -ge 1 ] && [ $# -le 2 ] || { echo "usage: nsplit-sockdir PROFILE [check]" >&2; exit 64; }
+name=$1; mode=${2:-set}
+case $mode in set|check) ;; *) echo "usage: nsplit-sockdir PROFILE [check]" >&2; exit 64;; esac
+[[ $name =~ ^[a-z][a-z0-9_-]{0,11}$ ]] || fail "not a profile name"
+[ "$mode" = check ] || [ "$(id -u)" = 0 ] || [ -n "$TESTMODE" ] || fail "setting the directory needs root"
+# Fixed kernel path even in test mode. The sentinel preserves trailing newlines so extra output cannot be mistaken for one value. Tests use a chroot predicate fixture, never a machine sysctl write.
+hardlinks=$(cat -- /proc/sys/fs/protected_hardlinks 2>/dev/null && printf '.') \
+	|| { echo "unknown: fs.protected_hardlinks could not be read; socket isolation could not be verified"; exit 2; }
+hardlinks=${hardlinks%.}
+case $hardlinks in
+1|$'1\n') ;;
+0|$'0\n') echo "unsafe: fs.protected_hardlinks is 0; an owner-created external socket alias could bypass the directory. An administrator must keep this setting at 1 and restart the daemon after any prior exposure; nsplit does not change it"; exit 1;;
+*) echo "unknown: fs.protected_hardlinks did not contain one interpretable 0 or 1 value; socket isolation could not be verified"; exit 2;;
+esac
+rec=$ETC/profiles/$name.env
+[ -r "$rec" ] || fail "no profile $name"
+login=; uidn=; eval "$( . "$rec"; printf 'login=%q uidn=%q' "${LOGIN-}" "${UIDN-}" )"
+[[ $uidn =~ ^[1-9][0-9]*$ ]] || fail "the profile record has no usable uid"
+[ "$(id -u "$login" 2>/dev/null)" = "$uidn" ] || fail "the account $login no longer has uid $uidn, the one the profile record names"
+dir=$TSRUN/tailscale-$name
+if [ -L "$dir" ] || { [ -e "$dir" ] && [ ! -d "$dir" ]; }; then
+	fail "$dir is not a real directory (refusing a symlink or another file type)"
+fi
+if [ ! -d "$dir" ]; then
+	[ "$mode" = check ] && { echo "absent: $dir does not exist (the profile's daemon is not running)"; exit 3; }
+	fail "$dir is not a directory"
+fi
+if [ -n "$TESTMODE" ]; then want_owner="$(id -u):$(id -g)"; else want_owner=0:0; fi
+want_acl=$(printf 'user::rwx\nuser:%s:--x\ngroup::---\nmask::--x\nother::---' "$uidn")
+# A stale socket is allowed only when it is an actual socket owned by the directory's owner. Never follow a socket symlink or remove an unexpected file.
+socket_state() {
+	local p=$dir/tailscaled.sock so links
+	[ ! -L "$p" ] || { echo "socket path is a symlink"; return 0; }
+	[ -e "$p" ] || return 0
+	[ -S "$p" ] || { echo "socket path is not a socket"; return 0; }
+	so=$(stat -c '%u %h' -- "$p" 2>/dev/null) || return 2
+	links=${so#* }; so=${so%% *}
+	[[ $so =~ ^[0-9]+$ && $links =~ ^[1-9][0-9]*$ ]] || return 2
+	[ "$so" = "${want_owner%%:*}" ] || { echo "socket is owned by uid $so, not ${want_owner%%:*}"; return 0; }
+	# During ExecStartPre an old socket may remain after its daemon stopped. Do not prevent the new daemon from replacing it, and never unlink it here.
+	if [ "$mode" = check ] && [ "$links" != 1 ]; then echo "socket has $links hard links; external names may bypass the directory. Restart the managed daemon to replace this listener"; fi
+	return 0
+}
+# state: prints nothing when the directory is exactly as intended, else one line saying how it differs; returns 2 when it cannot be read
+state() {
+	local o m a
+	o=$(stat -c '%u:%g' -- "$dir" 2>/dev/null) || return 2
+	[ "$o" = "$want_owner" ] || { echo "owned by $o, not $want_owner"; return 0; }
+	a=$(getfacl -cpn -- "$dir" 2>/dev/null) || return 2
+	[ "$a" = "$want_acl" ] || { echo "access list is not the intended one: $(tr '\n' ' ' <<<"$a")"; return 0; }
+	m=$(stat -c '%a' -- "$dir" 2>/dev/null) || return 2
+	[ "$m" = 710 ] || { echo "mode is $m, not 710"; return 0; }
+	# Another user can inspect the directory's ACL without entering it. Its contents remain inaccessible to them.
+	if [ -x "$dir" ]; then socket_state || return 2
+	elif [ "$mode" = check ]; then echo "the socket's link count needs traversal by its owner or an administrator"; return 2; fi
+	return 0
+}
+if [ "$mode" = check ]; then
+	command -v getfacl >/dev/null 2>&1 || { echo "unknown: getfacl is not installed"; exit 2; }
+	why=$(state); rc=$?
+	[ $rc = 0 ] || { echo "unknown: $dir could not be fully checked${why:+: $why}"; exit 2; }
+	[ -z "$why" ] || { echo "loose: $dir: $why"; exit 1; }
+	echo "private: $dir is reachable only by root and $login; hard-link protection is enabled and any present socket has one link"; exit 0
+fi
+# A healthy directory is left untouched, including its inode and permissions.
+if command -v getfacl >/dev/null 2>&1; then
+	why=$(state); rc=$?
+	[ $rc != 0 ] || [ -n "$why" ] || { echo "nsplit-sockdir: $name: $dir is prepared for root and $login; hard-link protection is enabled (existing clients require a daemon restart for revocation)"; exit 0; }
+fi
+# Mask all old named/group entries off before clearing them. Changing an ACL's mode to 0750 would instead make old entries effective again.
+[ -n "$TESTMODE" ] || chown 0:0 -- "$dir" || fail "could not make $dir root's"
+chmod 00700 -- "$dir" || fail "could not make $dir root-only"
+command -v setfacl >/dev/null 2>&1 && command -v getfacl >/dev/null 2>&1 || fail "setfacl/getfacl (the acl package) are needed to give $login access to $dir and nobody else; $dir is root-only until then"
+setfacl -b -- "$dir" || fail "could not clear the old access list of $dir"
+why=$(socket_state); rc=$?
+[ $rc = 0 ] && [ -z "$why" ] || fail "$dir: ${why:-the socket could not be inspected}"
+setfacl --set="u::rwx,u:$uidn:--x,g::---,m::--x,o::---" -- "$dir" || fail "could not give uid $uidn access to $dir"
+why=$(state); rc=$?
+[ $rc = 0 ] && [ -z "$why" ] || fail "$dir is not as intended after setting it: ${why:-could not be read}"
+echo "nsplit-sockdir: $name: $dir is prepared for root and $login (uid $uidn): owner root, mode 0710, group access denied, one entry user:$uidn:--x; hard-link protection is enabled"

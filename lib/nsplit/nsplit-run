@@ -1,0 +1,18 @@
+#!/bin/bash -p
+# nsplit-run <profile> [-u user] -- cmd...   (internal helper, root) run a command inside the profile's namespace as the profile's user (or -u user).
+# Privileged bash (-p): a root helper does not read BASH_ENV/ENV or import functions from whoever started it (nsplit-scoped also hands it a clean environment; this is the second barrier).
+# Mirrors the sandbox of nsplit-tailscaled@<profile>.service so checks exercise the same view the user's programs get:
+#  * the namespace's own DNS file, the host systemd-resolved socket hidden (Unix sockets ignore network namespaces!)
+#  * the host tailscaled socket replaced by this namespace's own daemon directory
+set -euo pipefail
+ETC=${NSPLIT_ETC:-/etc/nsplit}; NETNSETC=${NSPLIT_NETNS_ETC:-/etc/netns}
+name=${1:?profile}; shift
+[ -r "$ETC/profiles/$name.env" ] || { echo "nsplit-run: no profile $name" >&2; exit 1; }
+user=$(. "$ETC/profiles/$name.env"; printf %s "$LOGIN")
+[ "${1:-}" = "-u" ] && { user=$2; shift 2; }
+[ "${1:-}" = "--" ] && shift
+props=(-p "User=$user" -p "NetworkNamespacePath=/run/netns/netns-$name"
+       -p "BindReadOnlyPaths=$NETNSETC/netns-$name/resolv.conf:/etc/resolv.conf"
+       -p "InaccessiblePaths=-/run/systemd/resolve")
+if [ -d "/run/tailscale-$name" ]; then props+=(-p "BindPaths=/run/tailscale-$name:/run/tailscale"); else props+=(-p "InaccessiblePaths=-/run/tailscale"); fi
+exec systemd-run --quiet --wait --pipe --collect "${props[@]}" -- "$@"

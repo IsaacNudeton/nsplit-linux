@@ -1,0 +1,67 @@
+# nsplit host-side ruleset. Loaded by nsplit-fw, which prepends:
+#   define NSIFS    = { host-side veth names }
+#   define UPLINKS  = { permitted egress interfaces }
+#   define NSSRC / NSDST = { "<veth>" . <address> } pairs: each veth may only carry its own namespace's source address
+#   define POOL     = the address pool the namespace addresses come from (masqueraded on the way out)
+# Own tables only: nothing here touches ufw, NetworkManager or tailscale rules.
+# Base chains run at priority -10 (before ufw's filter chains) and default to ACCEPT, so
+# traffic that is not to/from an nsplit veth is never affected. NOTE: an accept here does NOT
+# override ufw's DROP policy -- forwarded traffic additionally needs `ufw route allow` rules.
+
+table inet nsplit
+delete table inet nsplit
+table ip nsplit_nat
+delete table ip nsplit_nat
+
+table inet nsplit {
+	set not_public {
+		type ipv4_addr
+		flags interval
+		elements = { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
+		             172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 224.0.0.0/3 }
+	}
+
+	# --- traffic addressed TO the host itself, arriving from a namespace ---
+	chain input {
+		type filter hook input priority -10; policy accept;
+		iifname $NSIFS jump from_ns
+	}
+	chain from_ns {
+		iifname . ip saddr != $NSSRC meta nfproto ipv4 counter drop   # anti-spoof: only the namespace's own address
+		ct state established,related counter accept
+		ct state invalid counter drop
+		iifname . ip daddr $NSDST icmp type echo-request limit rate 10/second counter accept
+		counter drop
+	}
+
+	# --- traffic being ROUTED through the host ---
+	chain forward {
+		type filter hook forward priority -10; policy accept;
+		iifname $NSIFS oifname $NSIFS counter drop
+		# the uplinks have forwarding=1 only so replies can reach a namespace: never route anything else from them
+		iifname $UPLINKS oifname != $NSIFS counter drop
+		iifname $NSIFS iifname . ip saddr != $NSSRC meta nfproto ipv4 counter drop
+		iifname $NSIFS jump ns_out
+		oifname $NSIFS jump ns_in
+	}
+	chain ns_out {
+		ct state invalid counter drop
+		meta nfproto ipv6 counter drop
+		oifname != $UPLINKS counter drop
+		ip daddr @not_public counter drop
+		meta l4proto { tcp, udp, icmp } counter accept
+		counter drop
+	}
+	chain ns_in {
+		iifname != $UPLINKS counter drop
+		ct state established,related counter accept
+		counter drop
+	}
+}
+
+table ip nsplit_nat {
+	chain post {
+		type nat hook postrouting priority srcnat; policy accept;
+		ip saddr $POOL oifname $UPLINKS counter masquerade
+	}
+}

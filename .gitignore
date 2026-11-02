@@ -1,0 +1,34 @@
+# Generated source/package archives and Arch build trees.
+*.tar.gz
+*.pkg.tar.*
+/packaging/arch/src/
+/packaging/arch/pkg/
+/packaging/arch/*.log
+/build/
+/dist/
+/stage/
+
+# Private local evidence and disposable agent work stay outside the product tree.
+/evidence/
+/toolkit-checks/
+/scratch/
+/.scratch/
+*.log
+__pycache__/
+*.py[cod]
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Local credentials/state and VM artifacts are never publication inputs.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.state
+*.qcow2
+*.vmdk
+*.vdi
+*.iso

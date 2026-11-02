@@ -1,0 +1,46 @@
+[Unit]
+Description=Tailscale daemon for profile %i (inside netns-%i; own state, socket, TUN)
+# The profile's daemon must NEVER run without its namespace AND the host firewall:
+#  * Requires= : if the firewall unit fails to start, this unit is not started at all
+#  * BindsTo=  : if the firewall (or the namespace) is stopped or fails later, this unit is stopped with it
+#  * After=    : on shutdown this unit stops BEFORE the firewall and the namespace are torn down
+Requires=nsplit-netns@%i.service nsplit-firewall.service
+BindsTo=nsplit-netns@%i.service nsplit-firewall.service
+After=nsplit-netns@%i.service nsplit-firewall.service tailscaled.service
+# (ordering only: the host daemon is never required, started, stopped or touched by this unit)
+
+[Service]
+Type=notify
+EnvironmentFile=/etc/nsplit/profiles/%i.env
+# Join the existing namespace. Everything this daemon spawns (incl. Tailscale SSH sessions) inherits it.
+NetworkNamespacePath=/run/netns/netns-%i
+# Namespace-private DNS; tailscaled cannot rewrite it (read-only bind), and the node runs --accept-dns=false anyway.
+BindReadOnlyPaths=/etc/netns/netns-%i/resolv.conf:/etc/resolv.conf
+# Unix sockets are NOT scoped by network namespaces. Without these lines a process in this namespace would resolve names through the HOST's systemd-resolved
+# (nsswitch "resolve") and `tailscale` would talk to the HOST's daemon.
+InaccessiblePaths=-/run/systemd/resolve -/var/lib/tailscale
+BindPaths=/run/tailscale-%i:/run/tailscale
+# Before listening: require fs.protected_hardlinks=1 and prepare the directory ACL (see RuntimeDirectoryMode below). The helper never changes that machine setting; failure stops the start.
+# An administrator must keep the setting enabled while running. Restart after known exposure: enabling it again does not revoke existing aliases or clients.
+# ExecStartPre allows a stopped daemon's root-owned real socket to remain; tailscaled replaces that canonical name. The helper never unlinks an active socket.
+ExecStartPre=@LIBDIR@/nsplit-sockdir %i
+ExecStart=/usr/bin/tailscaled --state=/var/lib/tailscale-%i/tailscaled.state --statedir=/var/lib/tailscale-%i --socket=/run/tailscale/tailscaled.sock --port=${TS_PORT} --tun=${TS_IF}
+ExecStopPost=-/usr/bin/tailscaled --cleanup --state=/var/lib/tailscale-%i/tailscaled.state --socket=/run/tailscale/tailscaled.sock
+Restart=on-failure
+RuntimeDirectory=tailscale-%i
+# sshd (which survives a daemon crash) bind-mounts this directory at /run/tailscale. systemd removes a RuntimeDirectory when the unit stops; without
+# Preserve=restart the crash-restart would create a NEW directory and sshd's bind would keep pointing at the old, socket-less one.
+RuntimeDirectoryPreserve=restart
+# The daemon's control socket is world-writable (0666), so nsplit-sockdir sets and verifies the directory ACL before the daemon can listen:
+# root owns the lifecycle, only the named profile owner gets traversal, and the owning group and other users get no access (final mode 0710).
+# systemd re-applies RuntimeDirectoryMode before each Exec* command. Its group bits must match the ACL mask (--x): 0700 would mask off the owner's entry again before ExecStart.
+# On a fresh directory, 0710 initially allows the owning group traversal; the helper removes that grant before listening. A retained directory can contain a stopped daemon's socket.
+# Migration still restarts an active daemon whose permissions need repair to close existing connections. RuntimeDirectoryPreserve keeps the directory inode used by existing bind mounts.
+RuntimeDirectoryMode=0710
+StateDirectory=tailscale-%i
+StateDirectoryMode=0700
+CacheDirectory=tailscale-%i
+CacheDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

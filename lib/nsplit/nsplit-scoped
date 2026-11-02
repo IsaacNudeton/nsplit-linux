@@ -1,0 +1,61 @@
+#!/bin/bash -p
+# nsplit-scoped PROFILE verify|dns   (internal helper, runs as root through sudo)
+# The two fixed administrator operations a profile's own user may run. `nsplit add` writes ONE sudo rule per owner-managed profile (/etc/sudoers.d/nsplit-PROFILE) that lists exactly
+# these two command lines for that user and nothing else. This helper does not rely on that rule alone; it checks for itself that:
+#   - it is root, and it was started by sudo for the user the profile record names (SUDO_UID is set by sudo and cannot be set by the caller), or by root;
+#   - the account still has the uid the record names, and the profile is owner-managed (a record that says nothing counts as root-managed);
+#   - the operation is one of the two words below, with no other argument.
+# It ignores the caller's environment, for itself AND for every program it starts: bash runs privileged (-p: no BASH_ENV/ENV, no imported functions, no SHELLOPTS), PATH is fixed, and unless the process
+# was started with nothing but PATH and SUDO_UID it starts itself again under `env -i` with only those two (see below). bash -p protects only this process: the variables it ignores are still
+# handed on to its children, and nsplit-run is a plain bash that would read BASH_ENV as root.
+# The NSPLIT_* overrides and NSPLIT_TEST exist for the off-host tests, and are honoured ONLY when the process is not root: a root process always runs with the real paths and commands.
+#   verify  read-only: is the profile's Tailscale daemon inside the profile's namespace, and not in the host's?     exit 0 yes, 10 no, 11 could not be told
+#   dns     switch on/repair and prove the profile's private DNS (the step `nsplit login` does as an administrator): 0 = done and proved, 20 = observed verification/repair failure,
+#           21 = error or unavailable observation, including incomplete rollback (the reason is on stderr).
+#   exit 12 = refused, 64 = wrong usage. (sudo itself exits 1 when it refuses to run this.)
+builtin unset -f $(builtin compgen -A function) 2>/dev/null
+PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+set -uo pipefail
+umask 022
+TESTMODE=
+if [ "$(id -u)" != 0 ] && [ -n "${NSPLIT_TEST:-}" ]; then TESTMODE=1; fi
+if [ -z "$TESTMODE" ]; then
+	# The caller's environment is not trusted, and bash can neither list nor remove all of it: exported functions (BASH_FUNC_x%%) and names that are not valid identifiers stay in what it hands to
+	# its children, and a plain bash child imports the functions and runs BASH_ENV. So unless this process was started with nothing but PATH and SUDO_UID, start the script again under `env -i`
+	# with exactly those two. The test reads the environment the process was really started with (/proc/self/environ), not a flag the caller could set: the marker below only stops a loop, and a
+	# marker that arrives together with anything else is a refusal, never a pass.
+	shopt -s execfail
+	dirty=; while IFS= read -r -d '' e; do case ${e%%=*} in PATH|SUDO_UID|NSPLIT_SCOPED_CLEAN) ;; *) dirty=1;; esac; done < /proc/self/environ \
+		|| { printf 'nsplit-scoped: could not read this process'"'"'s environment, so it cannot tell what the caller passed on\n' >&2; exit 21; }
+	if [ -n "$dirty" ]; then
+		[ -z "${NSPLIT_SCOPED_CLEAN:-}" ] || { printf 'nsplit-scoped: refused: the environment is not clean\n' >&2; exit 12; }
+		keep=(PATH="$PATH" NSPLIT_SCOPED_CLEAN=1); [ -z "${SUDO_UID+x}" ] || keep+=(SUDO_UID="$SUDO_UID")
+		exec /usr/bin/env -i "${keep[@]}" /bin/bash -p -- "$0" "$@" || { printf 'nsplit-scoped: could not start with a clean environment\n' >&2; exit 21; }
+	fi
+	unset NSPLIT_SCOPED_CLEAN
+fi
+refuse() { printf 'nsplit-scoped: refused: %s\n' "$*" >&2; exit 12; }
+[ $# -eq 2 ] || { echo "usage: nsplit-scoped PROFILE verify|dns" >&2; exit 64; }
+name=$1; op=$2
+case $op in verify|dns) ;; *) refuse "unknown operation";; esac
+[ "$(id -u)" = 0 ] || [ -n "$TESTMODE" ] || refuse "not running as root"
+SELF=$(readlink -f "$0"); LIB=$(dirname "$SELF"); ROOT=$(dirname "$(dirname "$LIB")"); SHARE=$ROOT/share/nsplit
+# shellcheck source=common.sh
+. "$LIB/common.sh" && . "$LIB/cmd-dns.sh" && . "$LIB/cmd-login.sh" || exit 21
+die() { printf 'nsplit: %s\n' "$*" >&2; exit 21; }   # an error inside this helper is exit 21, so the caller can tell it from sudo's own refusal (exit 1)
+valid_name "$name" || refuse "no such profile"
+profile_load "$name" || refuse "no such profile"
+caller=${SUDO_UID:-}
+if [ "$caller" != "$P_UIDN" ]; then
+	{ [ -z "$caller" ] || [ "$caller" = 0 ]; } && [ "$(id -u)" = 0 ] || refuse "this operation is only for $P_LOGIN"
+fi
+[ "$(id -u "$P_LOGIN" 2>/dev/null)" = "$P_UIDN" ] || refuse "the account $P_LOGIN no longer has the uid the profile record names"
+[ "${P_MANAGED:-}" = owner ] || refuse "profile $name is managed by an administrator"
+case $op in
+verify) endpoint_check "$name"; rc=$?
+	if [ $rc = 0 ]; then echo "verified: the profile's Tailscale daemon runs inside $P_NS and not in the host namespace"; else echo "$ENDPOINT_WHY"; fi
+	exit $rc;;
+dns) # dns_apply owns the per-profile lock for this path AND administrator calls.
+	dns_apply "$name"; rc=$?
+	case $rc in 0) exit 0;; 1) exit 20;; *) exit 21;; esac;;
+esac

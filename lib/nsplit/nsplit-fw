@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# nsplit-fw up|down|forward <profile>|kill-sessions : (internal helper, run by nsplit-firewall.service) load/unload the host-side ruleset and per-interface forwarding.
+# Global net.ipv4.ip_forward is NEVER touched; only the veths and the uplinks get forwarding=1
+# (IPv4 forwarding is decided by the *ingress* interface), and the previous values are restored on down.
+set -euo pipefail
+ETC=${NSPLIT_ETC:-/etc/nsplit}; RUN=${NSPLIT_RUN:-/run/nsplit}; PROF=$ETC/profiles
+TEMPLATE=${NSPLIT_NFT_TEMPLATE:-/usr/share/nsplit/nsplit.nft}
+# Only `up` needs the config. `down` and `kill-sessions` must work even if the config is missing or damaged (they are the rollback path).
+vhs=(); src=(); dst=(); ups=()
+if [ "${1:-}" = up ]; then
+	# shellcheck disable=SC1091
+	. "$ETC/nsplit.conf"
+	for f in "$PROF"/*.env; do
+		[ -e "$f" ] || continue
+		read -r vh nip hip < <(. "$f"; printf '%s %s %s\n' "$VH" "$NS_IP" "$HOST_IP")
+		vhs+=("$vh"); src+=("\"$vh\" . $nip"); dst+=("\"$vh\" . $hip")
+	done
+	[ ${#vhs[@]} -gt 0 ] || { echo "nsplit-fw: no profiles configured; nothing to load" >&2; exit 0; }
+	ups=($UPLINKS); : "${POOL:?POOL missing in $ETC/nsplit.conf}"
+fi
+j() { local IFS=,; printf '%s' "${*}"; }
+q() { local o="" i; for i in "$@"; do o+="${o:+, }\"$i\""; done; printf '%s' "$o"; }
+
+up() {
+	# Fail closed: if ANY step of `up` fails part-way (filter loaded but a sysctl failed, ...), undo it all so a
+	# half-configured firewall never stays behind. down() only touches nsplit's own tables and flags it recorded.
+	# `ok` is set as the very last statement: a signal kill (TERM/HUP/INT) leaves $? at 0 in an EXIT trap, so $? alone is not enough.
+	# RELOAD (our table is already loaded, e.g. `systemctl reload nsplit-firewall`): a failed or interrupted run must NOT tear the protection
+	# down or kill sessions. nft applies the whole ruleset file as one transaction, so a failure before/inside it leaves the old rules in force.
+	reload=""; nft list table inet nsplit >/dev/null 2>&1 && reload=1
+	ok=""; trap '[ -n "$ok" ] || if [ -n "$reload" ]; then echo "nsplit-fw: reload did not complete; the rules and forwarding state loaded before are kept" >&2
+		else echo "nsplit-fw: up did not complete, undoing partial setup" >&2; kill_sessions || true; down || true; fi' EXIT
+	trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
+	mkdir -p "$RUN"
+	{ printf 'define NSIFS = { %s }\ndefine UPLINKS = { %s }\ndefine NSSRC = { %s }\ndefine NSDST = { %s }\ndefine POOL = %s\n' "$(q "${vhs[@]}")" "$(q "${ups[@]}")" "$(j "${src[@]}")" "$(j "${dst[@]}")" "$POOL"
+	  cat "$TEMPLATE"; } > "$RUN/ruleset.nft"
+	nft -c -f "$RUN/ruleset.nft"
+	nft -f "$RUN/ruleset.nft"
+	# A profile whose namespace is not up yet has no veth: it is skipped here and gets its forwarding from `forward <profile>` when it starts.
+	for i in "${vhs[@]}" "${ups[@]}"; do
+		[ -e "/sys/class/net/$i" ] || { echo "nsplit-fw: $i absent, skipped" >&2; continue; }
+		k="net.ipv4.conf.$i.forwarding"
+		[ -e "$RUN/prev.$i" ] || sysctl -n "$k" > "$RUN/prev.$i"
+		sysctl -qw "$k=1"
+	done
+	ok=1
+}
+# reap_ns <ns>: end every process inside the namespace and CONFIRM it is empty. Returns 0 only when an enumeration that SUCCEEDED lists nothing;
+# a failed enumeration is "unknown", never "empty". TERM, wait, KILL, wait. Only processes ip(8) lists in that exact namespace are signalled.
+reap_ns() {
+	local ns=$1 pl n
+	pl=$(ip netns pids "$ns" 2>/dev/null) || { echo "nsplit: WARN cannot enumerate the processes in $ns (state unknown)" >&2; return 1; }
+	[ -z "$pl" ] && return 0
+	printf '%s\n' $pl | xargs -r kill -TERM 2>/dev/null || true
+	for n in 1 2 3 4 5 6 7 8 9 10; do
+		sleep 0.5; pl=$(ip netns pids "$ns" 2>/dev/null) || { echo "nsplit: WARN cannot enumerate the processes in $ns (state unknown)" >&2; return 1; }
+		[ -z "$pl" ] && return 0
+	done
+	printf '%s\n' $pl | xargs -r kill -KILL 2>/dev/null || true
+	for n in 1 2 3 4 5 6; do
+		sleep 0.5; pl=$(ip netns pids "$ns" 2>/dev/null) || { echo "nsplit: WARN cannot enumerate the processes in $ns (state unknown)" >&2; return 1; }
+		[ -z "$pl" ] && return 0
+	done
+	echo "nsplit: WARN process(es) still alive in $ns after TERM and KILL: $(echo $pl)" >&2; return 1
+}
+kill_sessions() {
+	# Namespaces come from the root-owned records nsplit-netns wrote when it created them ($RUN/ns.*, independent of the config) plus the
+	# env files (if readable). Returns 1 if any namespace could not be confirmed empty.
+	local f ns nss=() left=0
+	for f in "$RUN"/ns.*; do [ -e "$f" ] || continue; ns=$(. "$f" 2>/dev/null; printf %s "${NS:-}"); nss+=("$ns"); done
+	for f in "$PROF"/*.env; do [ -e "$f" ] || continue; ns=$(. "$f" 2>/dev/null; printf %s "${NS:-}"); nss+=("$ns"); done
+	for ns in $(printf '%s\n' "${nss[@]}" | sort -u); do
+		case $ns in netns-*) ;; *) continue ;; esac
+		[ -e "/run/netns/$ns" ] || continue
+		reap_ns "$ns" || left=1
+	done
+	return $left
+}
+down() {
+	# 1. close forwarding FIRST (forwarding is decided by the ingress interface) and READ IT BACK, 2. only then remove the filter.
+	# If restoration cannot be confirmed, the filter and the recorded previous values are KEPT so `down` can be retried; exit non-zero.
+	local f i want got bad=0
+	for f in "$RUN"/prev.*; do
+		[ -e "$f" ] || continue
+		i=${f##*/prev.}
+		if [ -e "/sys/class/net/$i" ]; then
+			want=$(cat "$f")
+			sysctl -qw "net.ipv4.conf.$i.forwarding=$want" 2>/dev/null || true; got=$(sysctl -n "net.ipv4.conf.$i.forwarding" 2>/dev/null || echo unreadable)
+			if [ "$got" = "$want" ]; then rm -f "$f"
+			else echo "nsplit-fw: WARN could not restore forwarding on $i (wanted $want, read back $got); keeping the filter and the record" >&2; bad=1; fi
+		else rm -f "$f"; fi
+	done
+	[ "$bad" = 0 ] || return 1
+	# delete our two tables and CONFIRM they are gone; absence (read from a query that succeeded) is idempotent success,
+	# a failed query or a table that is still there is incomplete cleanup (non-zero; the generated rules file is kept for the retry)
+	local tb t
+	tb=$(nft list tables 2>/dev/null) || { echo "nsplit-fw: WARN cannot query nft tables; cleanup not confirmed" >&2; return 1; }
+	for t in "inet nsplit" "ip nsplit_nat"; do grep -qx "table $t" <<<"$tb" && { nft delete table $t 2>/dev/null || true; }; done
+	tb=$(nft list tables 2>/dev/null) || { echo "nsplit-fw: WARN cannot re-query nft tables; cleanup not confirmed" >&2; return 1; }
+	for t in "inet nsplit" "ip nsplit_nat"; do grep -qx "table $t" <<<"$tb" && { echo "nsplit-fw: WARN table $t is still loaded after delete" >&2; bad=1; }; done
+	[ "$bad" = 0 ] || return 1
+	rm -f "$RUN/ruleset.nft"
+}
+# forward <profile>: called when a profile's namespace comes up while the firewall is already loaded: that veth is brand new (forwarding 0), so give it forwarding
+# NOW, but only if the filter is in force. With no filter loaded nothing is enabled (fail closed); `up` covers that profile when the firewall starts.
+forward() {
+	local name=${1:?profile} vh k
+	[ -r "$PROF/$name.env" ] || { echo "nsplit-fw: no profile $name" >&2; return 1; }
+	vh=$(. "$PROF/$name.env"; printf %s "$VH")
+	nft list table inet nsplit >/dev/null 2>&1 || { echo "nsplit-fw: the filter is not loaded; forwarding for $vh stays off" >&2; return 0; }
+	[ -e "/sys/class/net/$vh" ] || { echo "nsplit-fw: $vh does not exist" >&2; return 1; }
+	k="net.ipv4.conf.$vh.forwarding"; mkdir -p "$RUN"
+	[ -e "$RUN/prev.$vh" ] || sysctl -n "$k" > "$RUN/prev.$vh"
+	sysctl -qw "$k=1"
+}
+case "${1:?up|down|forward|kill-sessions}" in up) up ;; down) down ;; forward) forward "${2:-}" ;; kill-sessions) kill_sessions ;; *) echo "usage: up|down|forward <profile>|kill-sessions" >&2; exit 2 ;; esac

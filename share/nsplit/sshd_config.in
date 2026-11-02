@@ -1,0 +1,35 @@
+# OpenSSH for profile @NAME@, run by nsplit-sshd@@NAME@.service INSIDE netns-@NAME@. Independent of the host's sshd.
+# Reachable from the host over the veth (ssh @LOGIN@@@NS_IP@) and, once the node is signed in, from the profile's tailnet on @TS_IF@:22.
+Port 22
+ListenAddress 0.0.0.0
+AddressFamily inet
+HostKey @ETC@/ssh/@NAME@/ssh_host_ed25519_key
+PidFile /run/nsplit-sshd-@NAME@/sshd.pid
+
+AllowUsers @LOGIN@
+PermitRootLogin no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+# root-owned key file first (keys the admin installs), then the user's own ~/.ssh/authorized_keys
+AuthorizedKeysFile @ETC@/ssh/@NAME@/authorized_keys .ssh/authorized_keys
+StrictModes yes
+UsePAM yes
+
+AllowTcpForwarding no
+AllowAgentForwarding no
+X11Forwarding no
+PermitTunnel no
+GatewayPorts no
+PermitUserEnvironment no
+PermitUserRC no
+# AcceptEnv: deliberately absent (default = accept no client environment variables)
+LoginGraceTime 30
+MaxAuthTries 3
+MaxStartups 5:50:10
+ClientAliveInterval 60
+ClientAliveCountMax 3
+PrintMotd no
+Subsystem sftp internal-sftp

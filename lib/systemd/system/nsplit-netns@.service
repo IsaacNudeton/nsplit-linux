@@ -1,0 +1,11 @@
+[Unit]
+Description=nsplit network namespace for profile %i (netns + veth link)
+After=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=@LIBDIR@/nsplit-netns up %i
+# a veth created while the firewall is already loaded starts with forwarding off: give it forwarding now (does nothing unless the filter is in force)
+ExecStartPost=-@LIBDIR@/nsplit-fw forward %i
+ExecStop=@LIBDIR@/nsplit-netns down %i

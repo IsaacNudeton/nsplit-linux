@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# nsplit-netns up|down|nsfw <profile>   (internal helper: run by nsplit-netns@<profile>.service; use the `nsplit` command)
+#   up   : create netns + veth pair + addressing + default route + in-namespace firewall
+#   down : delete veth + netns (idempotent)
+#   nsfw : (re)apply only the in-namespace firewall
+set -euo pipefail
+ETC=${NSPLIT_ETC:-/etc/nsplit}; RUN=${NSPLIT_RUN:-/run/nsplit}; PROF=$ETC/profiles
+action=${1:?up|down|nsfw}; name=${2:?name}
+# `down` must work without the config (rollback path): fall back to the root-owned record written by `up`.
+if [ -r "$PROF/$name.env" ]; then
+	# shellcheck disable=SC1090
+	. "$PROF/$name.env"
+elif [ "$action" = down ] && [ -r "$RUN/ns.$name" ]; then
+	# shellcheck disable=SC1090
+	. "$RUN/ns.$name"
+else
+	echo "nsplit-netns: no profile $PROF/$name.env and no record $RUN/ns.$name" >&2; exit 1
+fi
+: "${NS:?}" "${VH:?}"
+[ "$action" = down ] || : "${VN:?}" "${HOST_IP:?}" "${NS_IP:?}" "${PLEN:?}"
+
+nsfw() {
+	ip netns exec "$NS" nft delete table inet nsplit_ns 2>/dev/null || true
+	ip netns exec "$NS" nft -f - <<NFT
+table inet nsplit_ns {
+	chain input {
+		type filter hook input priority 0; policy accept;
+		iifname "$VN" ct state established,related accept
+		iifname "$VN" ip saddr $HOST_IP accept
+		iifname "$VN" counter drop
+	}
+	chain output {
+		type filter hook output priority 0; policy accept;
+		oifname "$VN" ip daddr != $HOST_IP ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 224.0.0.0/3 } counter drop
+	}
+}
+NFT
+}
+# reap_ns <ns>: end every process inside the namespace and CONFIRM it is empty. Returns 0 only when an enumeration that SUCCEEDED lists nothing;
+# a failed enumeration is "unknown", never "empty". TERM, wait, KILL, wait. Only processes ip(8) lists in that exact namespace are signalled.
+reap_ns() {
+	local ns=$1 pl n
+	pl=$(ip netns pids "$ns" 2>/dev/null) || { echo "nsplit: WARN cannot enumerate the processes in $ns (state unknown)" >&2; return 1; }
+	[ -z "$pl" ] && return 0
+	printf '%s\n' $pl | xargs -r kill -TERM 2>/dev/null || true
+	for n in 1 2 3 4 5 6 7 8 9 10; do
+		sleep 0.5; pl=$(ip netns pids "$ns" 2>/dev/null) || { echo "nsplit: WARN cannot enumerate the processes in $ns (state unknown)" >&2; return 1; }
+		[ -z "$pl" ] && return 0
+	done
+	printf '%s\n' $pl | xargs -r kill -KILL 2>/dev/null || true
+	for n in 1 2 3 4 5 6; do
+		sleep 0.5; pl=$(ip netns pids "$ns" 2>/dev/null) || { echo "nsplit: WARN cannot enumerate the processes in $ns (state unknown)" >&2; return 1; }
+		[ -z "$pl" ] && return 0
+	done
+	echo "nsplit: WARN process(es) still alive in $ns after TERM and KILL: $(echo $pl)" >&2; return 1
+}
+down() {
+	# anything still running inside (e.g. a login session that outlived its daemon) must not outlive its network plumbing.
+	# Every step is CHECKED: the namespace NAME and the record are removed only when the namespace is confirmed empty, the veth confirmed
+	# gone and the name confirmed deleted; otherwise they are kept so the state stays findable and `down` can be retried (non-zero).
+	local bad=0
+	if [ -e "/run/netns/$NS" ]; then reap_ns "$NS" || bad=1; fi
+	if [ -e "/sys/class/net/$VH" ]; then
+		ip link del "$VH" 2>/dev/null || true
+		[ ! -e "/sys/class/net/$VH" ] || { echo "nsplit-netns: WARN could not delete link $VH" >&2; bad=1; }
+	fi
+	if [ "$bad" != 0 ]; then echo "nsplit-netns: $NS not cleaned up; namespace name and record kept for a retry" >&2; return 1; fi
+	if [ -e "/run/netns/$NS" ]; then
+		ip netns del "$NS" 2>/dev/null || true
+		[ ! -e "/run/netns/$NS" ] || { echo "nsplit-netns: WARN could not delete namespace name $NS; record kept" >&2; return 1; }
+	fi
+	rm -f "$RUN/ns.$name" "$RUN/prev.$VH"   # the veth is gone, so is the forwarding value recorded for it
+}
+up() {
+	down
+	mkdir -p "$RUN"; printf 'NS=%s\nVH=%s\n' "$NS" "$VH" > "$RUN/ns.$name"   # root-owned record of what was created (used by down/kill-sessions without the config)
+	ip netns add "$NS"
+	ip link add "$VH" type veth peer name "$VN" netns "$NS"
+	sysctl -qw "net.ipv6.conf.$VH.disable_ipv6=1"
+	ip addr add "$HOST_IP/$PLEN" dev "$VH"
+	ip link set "$VH" up
+	ip -n "$NS" link set lo up
+	ip netns exec "$NS" sysctl -qw "net.ipv6.conf.$VN.disable_ipv6=1" net.ipv4.ip_forward=0 "net.ipv4.conf.$VN.rp_filter=1"
+	# a new namespace starts with unprivileged ICMP echo OFF ("1 0"), so `ping` fails for ordinary users there; the host allows it ("0 2147483647").
+	# This sysctl is per-namespace (nothing on the host changes) and only lets a user ping from inside his own namespace, subject to the same firewall.
+	# (best effort: a kernel that cannot map the wide range, e.g. a one-gid user-namespace sandbox, gets "0 0"; failure only costs unprivileged ping)
+	ip netns exec "$NS" sysctl -qw "net.ipv4.ping_group_range=0 2147483647" 2>/dev/null || ip netns exec "$NS" sysctl -qw "net.ipv4.ping_group_range=0 0" 2>/dev/null \
+		|| echo "nsplit-netns: WARN could not set ping_group_range in $NS (unprivileged ping will not work there)" >&2
+	ip -n "$NS" addr add "$NS_IP/$PLEN" dev "$VN"
+	ip -n "$NS" link set "$VN" up
+	ip -n "$NS" route add default via "$HOST_IP" dev "$VN"
+	nsfw
+}
+"$action"

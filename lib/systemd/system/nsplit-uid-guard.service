@@ -1,0 +1,17 @@
+[Unit]
+Description=nsplit backstop: no network egress, in the HOST namespace, for the uids of nsplit profiles
+# Loaded before any login can exist, so there is no window at boot. It does not depend on nsplit, tailscale or NetworkManager.
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target systemd-user-sessions.service display-manager.service
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/nft -f /etc/nsplit/uid-guard.nft
+# stop = remove only this table (stopping this unit REMOVES the guard; disabling it only stops it being loaded at boot)
+ExecStop=/usr/bin/nft delete table inet nsplit_uid
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN" "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<!-- nsplit: @LOGIN@'s processes may not talk to the HOST's systemd-resolved over the system bus. Unix sockets ignore network namespaces, so a D-Bus-aware client
+     (resolvectl, any program using org.freedesktop.resolve1) in the profile's namespace would otherwise resolve through the host's network and resolver.
+     glibc name lookups in the profile's view are not affected: they use its /etc/resolv.conf (the varlink socket is hidden by its mount view and nss-resolve then answers UNAVAIL).
+     Scope: ONLY this one bus name, ONLY this user. NetworkManager and every other service stay reachable; that remains an OPEN, documented limit. -->
+<busconfig>
+  <policy user="@LOGIN@">
+    <deny send_destination="org.freedesktop.resolve1"/>
+  </policy>
+</busconfig>
