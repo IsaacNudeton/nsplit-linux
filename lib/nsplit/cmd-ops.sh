@@ -115,6 +115,8 @@ usage_remove() { cat <<'EOF2'
 usage: nsplit remove PROFILE [--purge] [--dry-run] [--yes]
   Take a profile's nsplit configuration away: stops its units, removes the placement, login gate, D-Bus policy, guard entry, firewall entry and the files nsplit made.
   The user's account, home directory and files are never touched. The user then uses the host's network normally again.
+  A root-managed key file for the namespace OpenSSH server (/etc/nsplit/ssh/PROFILE/authorized_keys) is the administrator's: nsplit never deletes it and reports it as kept,
+  and it does not make the removal fail. (The one exception is a copy that is still exactly what nsplit 0.1.0-12/-13 wrote, which holds no keys.)
   The profile's Tailscale node identity (/var/lib/tailscale-PROFILE) is KEPT so adding the profile again needs no new sign-in; --purge deletes it
   (the node stays listed in the user's tailnet admin console until they remove it there).
   Refuses while the user is logged in (or when that cannot be checked). If any part cannot be completed, or a file nsplit made was changed by hand
@@ -122,7 +124,7 @@ usage: nsplit remove PROFILE [--purge] [--dry-run] [--yes]
 EOF2
 }
 cmd_remove() {
-	local purge=0 arg="" dry=0 yes=0 n ans fails=0 kept=0 f rest pl rec rc unresolved=""
+	local purge=0 arg="" dry=0 yes=0 n ans fails=0 kept=0 f rest pl rec rc unresolved="" keyfile
 	while [ $# -gt 0 ]; do case $1 in -h|--help) usage_remove; return 0;; --purge) purge=1; shift;; --dry-run) dry=1; shift;; --yes|-y) yes=1; shift;; -*) die "unknown option $1";; *) arg=$1; shift;; esac; done
 	[ -n "$arg" ] || { usage_remove >&2; exit 2; }
 	n=$(resolve_profile "$arg") || die "no nsplit profile '$arg'"
@@ -132,9 +134,12 @@ cmd_remove() {
 	say "nsplit remove: $n ($P_LOGIN, uid $P_UIDN)"
 	say "  will stop: nsplit-netns@$n nsplit-tailscaled@$n nsplit-dns@$n nsplit-sshd@$n (the firewall stays while other profiles remain)"
 	say "  will remove: the placement drop-in, the login-gate lines for $P_LOGIN, the D-Bus policy, the uid-guard entry, the ufw route rules, and every file nsplit created for $n:"
+	keyfile=$ETC/ssh/$n/authorized_keys
 	own_paths "$n" | while IFS= read -r f; do
-		if [ -e "$f" ] && [ "$(own_sha "$n" "$f")" != "$(sha "$f")" ]; then printf '    %s   (CHANGED since nsplit wrote it: it will be KEPT and reported as unresolved)\n' "$f"; else printf '    %s\n' "$f"; fi; done
+		if [ "$f" = "$keyfile" ] && [ -e "$f" ] && ! owned_unchanged "$n" "$f"; then continue   # the administrator's key file, which nsplit 0.1.0-12/-13 recorded as its own: listed below as kept
+		elif [ -e "$f" ] && [ "$(own_sha "$n" "$f")" != "$(sha "$f")" ]; then printf '    %s   (CHANGED since nsplit wrote it: it will be KEPT and reported as unresolved)\n' "$f"; else printf '    %s\n' "$f"; fi; done
 	say "  will keep: the user's account and files; the node identity /var/lib/tailscale-$n$( [ $purge = 1 ] && echo " (--purge: DELETED)")"
+	[ ! -e "$keyfile" ] || { [ -n "$(own_sha "$n" "$keyfile")" ] && [ "$(own_sha "$n" "$keyfile")" = "$(sha "$keyfile")" ]; } || say "  will keep: $keyfile (the administrator's key file: left in place, and not an error)"
 	[ "$dry" = 1 ] && { say "Dry run: nothing was changed."; return 0; }
 	if [ "$yes" != 1 ]; then read -r -p "Remove? [y/N] " ans </dev/tty || ans=n; case $ans in y|Y|yes) ;; *) say "Nothing was changed."; return 1;; esac; fi
 	ensure_logged_out "$n"   # re-checked after the confirmation: it may have waited a long time
@@ -146,6 +151,7 @@ cmd_remove() {
 		case $r in
 		0) printf '  done: %s\n' "$d";;
 		3) printf '  KEPT: %s (changed after nsplit wrote it; left alone)\n' "$d" >&2; kept=$((kept+1)); unresolved+="$d: changed after nsplit wrote it; left as it is"$'\n';;
+		4) printf '  kept: %s (the administrator'"'"'s key file: left in place and no longer recorded as nsplit'"'"'s; not an error)\n' "$d";;
 		*) printf '  FAILED: %s\n' "$d" >&2; fails=$((fails+1)); unresolved+="$d: did not complete"$'\n';;
 		esac; return $r; }
 	rest=$(profile_names | grep -vx "$n" | tr '\n' ' ')
@@ -161,7 +167,12 @@ cmd_remove() {
 	fi
 	step "ufw route rules" "$LIB/nsplit-ufw" del "$n"
 	step "D-Bus policy" remove_owned_file "$n" "$DBUSDIR/nsplit-$n.conf"
-	for f in $(own_paths "$n"); do [ "$f" = "$PROFDIR/$n.env" ] || step "$f" remove_owned_file "$n" "$f"; done
+	# a key file nsplit never recorded (an administrator made it after this fix) is not in the ownership list at all: it stays, and is said to (looked at before the loop, which forgets a recorded one)
+	if [ -e "$keyfile" ] && [ -z "$(own_sha "$n" "$keyfile")" ]; then printf '  kept: %s (the administrator'"'"'s key file: left in place; not an error)\n' "$keyfile"; fi
+	for f in $(own_paths "$n"); do
+		[ "$f" = "$PROFDIR/$n.env" ] && continue
+		if [ "$f" = "$keyfile" ]; then step "$f" remove_key_file "$n" "$f"; else step "$f" remove_owned_file "$n" "$f"; fi
+	done
 	step "bus policy reloaded" dbus_reload
 	# 3. only when all of that completed: regenerate what the profiles share without this one, then drop the profile record itself.
 	# The record is what lets a retry find the profile, and the guard and firewall are what protect the host from its user, so the record is checked FIRST,
@@ -179,6 +190,7 @@ cmd_remove() {
 				[ -n "$(profile_names)" ] || remove_owned_file _shared "$CONF" || true   # the last profile: the shared settings go too, unless the administrator changed them (said above)
 				rmdir "$ETC/ssh/$n" "$NETNSETC/netns-$n" 2>/dev/null; rmdir "$ETC/ssh" "$ETC/dns" "$PROFDIR" 2>/dev/null; rmdir "$ETC" 2>/dev/null
 				if [ "$purge" = 1 ]; then rm -rf "/var/lib/tailscale-$n" "$STATEMARK/$n" && say "  done: node identity deleted" || warn "could not delete /var/lib/tailscale-$n: delete it yourself"; fi
+				[ ! -e "$keyfile" ] || say "  The key file $keyfile was kept (it is the administrator's); delete it if it is not wanted."
 				say "Removed $n. $P_LOGIN now uses the host's network normally."
 				return 0
 			fi
@@ -199,6 +211,11 @@ ensure_logged_out() { profile_busy "$1"; case $? in
 	1) ;;
 	*) die "could not tell whether $P_LOGIN is logged in (loginctl or systemctl did not answer), so nothing was removed. Check that systemd-logind is running and try again.";;
 	esac; }
+# remove_key_file OWNER FILE: the root-managed authorized_keys that nsplit 0.1.0-12/-13 created and recorded as its own, although the file itself tells the administrator to put keys in it.
+# A changed one is the administrator's data: the ownership record is dropped, the file stays, and that is success (4 = kept). One still exactly as nsplit wrote it holds nothing and is removed.
+remove_key_file() { local o=$1 f=$2
+	if [ -e "$f" ] && ! owned_unchanged "$o" "$f"; then own_forget "$o" "$f"; return 4; fi
+	remove_owned_file "$o" "$f"; }
 # owned_unchanged OWNER FILE: true when FILE is gone or is still exactly what nsplit wrote
 owned_unchanged() { local want; [ -e "$2" ] || return 0; want=$(own_sha "$1" "$2"); [ -n "$want" ] && [ "$want" = "$(sha "$2")" ]; }
 remove_owned_file() { local o=$1 f=$2; [ -e "$f" ] || { own_forget "$o" "$f"; return 0; }
