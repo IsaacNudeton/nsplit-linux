@@ -15,6 +15,13 @@ IPC are not a complete isolation boundary; programs started outside managed
 sessions need explicit handling. Do not advertise every process of a user as
 universally sandboxed.
 
+**Remote shell options are not validated.** `--ssh openssh` (an OpenSSH server
+inside the profile namespace) and `--ssh tailscale` (Tailscale SSH on the profile's
+node) exist in the code but have not been tested in a guest. The host's own SSH
+server is unchanged and is not a way into a profile; the namespace OpenSSH server
+also listens on the profile's private link to the host, not only on its tailnet.
+See [validation](docs/VALIDATION.md).
+
 **Socket protection has prerequisites.** Keep `fs.protected_hardlinks=1` enabled.
 Nsplit checks it before listener setup and at operation boundaries; it does not
 monitor it continuously or change the setting. The root-owned directory permits

@@ -28,13 +28,39 @@ all-traffic Tailscale exit-node configuration, anonymity tool or complete
 application sandbox. Console and host-SSH shells are not automatically placed
 in the profile namespace; read the [security boundaries](SECURITY.md).
 
+## When should I use this instead of node sharing?
+
+Nsplit is heavier than the alternatives. Use the simplest one that meets the need.
+
+| You need | Likely fit |
+| --- | --- |
+| People in another tailnet to reach a service on one machine | Tailscale **node sharing**. The machine stays one node in one tailnet and is shared with the other. It does not give each local account its own node identity, DNS or listening-port space. |
+| Two Tailscale identities on one machine, and you are happy to build and maintain the plumbing | Two `tailscaled` daemons you manage yourself (separate state and control sockets, usually separate network namespaces or containers). |
+| Several local accounts on one machine, each with its own Tailscale node, tailnet, DNS and network namespace, applied at login | **nsplit**, within its [tested scope](docs/VALIDATION.md). It automates a version of the previous row for local accounts, with login-time placement, DNS and firewall checks, status and removal. |
+
+Nsplit is probably not for you if you only need to reach one shared service, if
+the machine has no Plasma login manager (see below), or if you need an exit node,
+anonymity or a full application sandbox.
+
 ## Intended environment
 
 The implemented integration targets Arch-family Linux, exercised in a CachyOS
 virtual machine, with systemd, nftables, Tailscale, dnsmasq and the **Plasma login
 manager (`plasmalogin`)**. KDE alone is not sufficient: other display managers
-are not supported by the current enrollment checks. The repository also includes
-a NetworkManager dispatcher hook and optional ufw/OpenSSH integration.
+are not supported by the current enrollment checks. Enrollment requires the
+Plasma login manager's PAM configuration whichever `--ssh` mode is chosen, so
+nsplit does not yet fit a headless server without it. The repository also
+includes a NetworkManager dispatcher hook and optional ufw integration.
+
+## Implemented, but not validated
+
+Enrollment accepts `--ssh none` (the default), `--ssh openssh` (a separate
+OpenSSH server inside the profile's namespace) and `--ssh tailscale` (Tailscale
+SSH on the profile's node). **`--ssh openssh` and `--ssh tailscale` exist in the
+code but have not yet been validated in a guest**; no test in the reviewed
+baseline enabled either. Treat both as unproven, and do not rely on them for
+remote access. The host's own SSH server is not changed by nsplit and is not a
+way into a profile. See [validation and limits](docs/VALIDATION.md).
 
 Enrollment changes login/network configuration and requires an administrator.
 The target account must be logged out, with no running user manager; programs

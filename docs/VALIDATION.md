@@ -43,8 +43,25 @@ its own command text and is **not** valid evidence for its old closure claims.
 Original failed runs remain part of the historical record, not erased by later
 passing runs.
 
+## Implemented, but not validated
+
+This table is about features present in the source that the reviewed baseline did
+not exercise. It is not a complete inventory; see also the list below.
+
+| Feature | In the code | Guest-validated |
+| --- | --- | --- |
+| `--ssh openssh`: a separate OpenSSH server in the profile namespace (`nsplit-sshd@PROFILE.service`) | Yes | **No.** Off-host checks with stand-ins covered file generation and the generated configuration. No guest profile used the option and nothing connected through it. |
+| `--ssh tailscale`: Tailscale SSH on the profile's node (`tailscale up --ssh`) | Yes | **No.** Off-host checks covered only the flag passed to `tailscale up`. No guest profile used the option and nothing connected through it. Whether such sessions pass the login-gate configuration is unknown. |
+
+Both are reachable only by enrolling with that option. Neither should be described
+as working, and nothing here shows that either fails. The generated namespace
+OpenSSH configuration listens on all IPv4 addresses inside the namespace, so a
+server enrolled this way is reachable from the host over the profile's private
+link as well as from the profile's tailnet.
+
 ## What is not claimed
 
+- `--ssh openssh` and `--ssh tailscale` (above) were not tested.
 - A fresh `nsplit add` on the final -12 guest package, a graphical desktop run on
   that package, or an installation on the real workstation was not demonstrated
   by the final acceptance program. Earlier-version and controlled tests retain

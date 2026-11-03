@@ -85,6 +85,9 @@ Useful enrollment options are `--name NAME`, `--hostname NAME`, `--root-managed`
 `--ssh none|tailscale|openssh`, and `--uplinks "IFACE IFACE"` for the first profile.
 Profile names are 1–12 lowercase letters/digits/underscores/hyphens and begin
 with a letter. `nsplit add --help` describes the options. SSH defaults to `none`.
+`--ssh openssh` and `--ssh tailscale` are implemented but **not yet validated in a
+guest** (see [validation](VALIDATION.md)); try them only on a disposable machine.
+Enrollment still requires the Plasma login manager whichever mode you choose.
 Use an explicit generic hostname when you do not want the default machine-derived
 name to appear in the tailnet.
 
