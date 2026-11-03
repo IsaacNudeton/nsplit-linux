@@ -15,12 +15,22 @@ IPC are not a complete isolation boundary; programs started outside managed
 sessions need explicit handling. Do not advertise every process of a user as
 universally sandboxed.
 
-**Remote shell options are not validated.** `--ssh openssh` (an OpenSSH server
-inside the profile namespace) and `--ssh tailscale` (Tailscale SSH on the profile's
-node) exist in the code but have not been tested in a guest. The host's own SSH
-server is unchanged and is not a way into a profile; the namespace OpenSSH server
-also listens on the profile's private link to the host, not only on its tailnet.
-See [validation](docs/VALIDATION.md).
+**Remote shell options are only partly validated.** `--ssh openssh` (an OpenSSH
+server inside the profile namespace) had one focused guest test of a single
+profile; `--ssh tailscale` (Tailscale SSH on the profile's node) has not been
+tested in a guest. The host's own SSH server is unchanged and is not a way into a
+profile; the namespace OpenSSH server also listens on the profile's private link to
+the host, not only on its tailnet. See [validation](docs/VALIDATION.md).
+
+**A running profile service can lose its view of the profile.** The profile
+services and user manager get the profile's resolver file and Tailscale socket
+directory through bind mounts. If the host replaces `/etc/resolv.conf` or
+recreates `/run/tailscale` afterwards, the running service silently sees the host's
+versions instead. `nsplit status` does not detect this
+([issue #1](https://github.com/IsaacNudeton/nsplit-linux/issues/1), open). Until it
+is fixed, treat a profile's DNS and control-socket separation as unverified after a
+boot or a host DNS or Tailscale restart unless you checked the mounts yourself
+(see [validation](docs/VALIDATION.md#known-issues)).
 
 **Socket protection has prerequisites.** Keep `fs.protected_hardlinks=1` enabled.
 Nsplit checks it before listener setup and at operation boundaries; it does not

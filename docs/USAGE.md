@@ -85,8 +85,9 @@ Useful enrollment options are `--name NAME`, `--hostname NAME`, `--root-managed`
 `--ssh none|tailscale|openssh`, and `--uplinks "IFACE IFACE"` for the first profile.
 Profile names are 1–12 lowercase letters/digits/underscores/hyphens and begin
 with a letter. `nsplit add --help` describes the options. SSH defaults to `none`.
-`--ssh openssh` and `--ssh tailscale` are implemented but **not yet validated in a
-guest** (see [validation](VALIDATION.md)); try them only on a disposable machine.
+`--ssh openssh` had one focused guest test and `--ssh tailscale` has **not been
+validated in a guest** (see [validation](VALIDATION.md)); try both only on a
+disposable machine.
 Enrollment still requires the Plasma login manager whichever mode you choose.
 Use an explicit generic hostname when you do not want the default machine-derived
 name to appear in the tailnet.
@@ -160,6 +161,12 @@ With the account fully logged out:
 sudo nsplit remove demo --dry-run
 sudo nsplit remove demo
 ```
+
+Known issues affect removal while they are open: the live firewall can keep the
+removed profile's rules until `sudo nsplit reload` ([#2](https://github.com/IsaacNudeton/nsplit-linux/issues/2)),
+and a key file you edited under `/etc/nsplit/ssh/PROFILE/` makes the first removal
+exit 1 ([#3](https://github.com/IsaacNudeton/nsplit-linux/issues/3)): keep a copy
+of the keys, delete that file and run the removal again.
 
 Removal takes away the managed profile configuration, not the local account or
 home directory. Files changed outside nsplit are kept and reported rather than

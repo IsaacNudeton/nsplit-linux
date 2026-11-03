@@ -43,25 +43,108 @@ its own command text and is **not** valid evidence for its old closure claims.
 Original failed runs remain part of the historical record, not erased by later
 passing runs.
 
-## Implemented, but not validated
+## Remote shell options
 
-This table is about features present in the source that the reviewed baseline did
-not exercise. It is not a complete inventory; see also the list below.
+Both options are reachable only by enrolling with that option.
 
 | Feature | In the code | Guest-validated |
 | --- | --- | --- |
-| `--ssh openssh`: a separate OpenSSH server in the profile namespace (`nsplit-sshd@PROFILE.service`) | Yes | **No.** Off-host checks with stand-ins covered file generation and the generated configuration. No guest profile used the option and nothing connected through it. |
+| `--ssh openssh`: a separate OpenSSH server in the profile namespace (`nsplit-sshd@PROFILE.service`) | Yes | **Partly.** One focused test (below). It is not part of the reviewed acceptance baseline. |
 | `--ssh tailscale`: Tailscale SSH on the profile's node (`tailscale up --ssh`) | Yes | **No.** Off-host checks covered only the flag passed to `tailscale up`. No guest profile used the option and nothing connected through it. Whether such sessions pass the login-gate configuration is unknown. |
 
-Both are reachable only by enrolling with that option. Neither should be described
-as working, and nothing here shows that either fails. The generated namespace
-OpenSSH configuration listens on all IPv4 addresses inside the namespace, so a
-server enrolled this way is reachable from the host over the profile's private
-link as well as from the profile's tailnet.
+### Focused `--ssh openssh` test (2026-11-03)
+
+One throwaway profile, enrolled with `--ssh openssh` (owner-managed) on the
+0.1.0-12 baseline package in the disposable CachyOS guest (OpenSSH 10.6, systemd,
+NetworkManager with `dns=systemd-resolved`); no Tailscale sign-in of any kind; the
+guest was rebooted once. The -13 snapshot has byte-identical program files, but it
+was not itself installed. Observed:
+
+- Enrollment (including its dry run) and the profile's `nsplit-sshd@` unit worked;
+  the server listens on port 22 inside the profile's namespace and not in the host's.
+- Public-key login from the host over the profile's private link, pinned to the
+  profile's own host key, with a key in the root-managed key file and with one in the
+  user's own `~/.ssh/authorized_keys`.
+- Inside such a session, before the reboot: the right user, the profile's network
+  namespace, the profile's resolver file, the profile's own Tailscale socket (another
+  profile's socket was refused), and name resolution through the profile's resolver.
+  The user's systemd manager was placed in the profile namespace.
+- Refused, each with the server's own log line as the reason and with a key that does
+  log in as the profile user: root, another enrolled user, an existing unenrolled
+  user, a host administrator, a nonexistent user; also an unauthorised key and
+  password authentication. Refused attempts started no session or user manager.
+- Local and remote port forwarding, agent forwarding and client environment
+  variables were refused, each against a positive control. X11 forwarding, tunnels,
+  `PermitUserEnvironment` and `GatewayPorts` were checked by the effective
+  configuration only, not by behavior.
+- After the reboot the service was up, kept its host key and still refused the same
+  users. Removal returned the checked state to the pre-enrollment baseline, apart
+  from the known issues below and one ownership-list file whose bytes differ for a
+  reason that was not established.
+
+Not covered: `--ssh tailscale`; a connection over the profile's tailnet; any
+Tailscale sign-in; a graphical session; `kill -9`; IPv6; more than one reboot or
+profile; a retest on the -13 package.
+
+## Known issues
+
+Open, with the issue tracker as the authority on status. They were found by the
+test above and a read-only inspection; none is fixed in this snapshot.
+
+**[#1](https://github.com/IsaacNudeton/nsplit-linux/issues/1) — profile bind mounts
+detach.** The profile services and the user manager bind the profile's files over
+`/etc/resolv.conf` and the profile's socket directory over `/run/tailscale`. A bind
+mount on a file is removed in every mount namespace when the host replaces that
+file by `rename`, and one on a directory when the host removes and recreates the
+directory. Both were reproduced in the guest against an untouched control unit.
+After the reboot, the host's `/etc/resolv.conf` was rewritten right after the
+services started (the host runs NetworkManager with `dns=systemd-resolved`, the
+likely writer; its system calls were not traced), and a session in the profile saw
+the host's stub resolver address and failed to resolve names. `nsplit status` still reported the
+profile ready, because its resolver probe starts a fresh process rather than
+inspecting the running services' mount tables. A read-only inspection of a
+long-running deployment of the same design found a service and a user manager with
+neither mount present, although their units declare both; the timestamps of the
+host paths are consistent with the replacement having happened after the services
+started. What a user in that state could do through the host's Tailscale socket was
+not tested.
+
+To check one service (as root), look for its two mount points; no line for a path
+means that mount is lost, and a line only shows that *a* mount exists:
+
+```sh
+pid=$(systemctl show -p MainPID --value nsplit-tailscaled@PROFILE.service)
+awk '$5 == "/etc/resolv.conf" || $5 == "/run/tailscale"' /proc/$pid/mountinfo
+```
+
+Use `user@UID.service` instead for a profile user's manager. Restarting a service
+re-creates its mounts (observed for the profile daemons in the guest). A logged-in
+user's manager cannot be restarted without ending that user's session. A live
+repair with `systemctl bind` is being prototyped in a disposable guest and is not
+proven.
+
+**[#2](https://github.com/IsaacNudeton/nsplit-linux/issues/2) — stale firewall
+rules after `remove`.** `nsplit remove PROFILE` regenerates the firewall while the
+profile's record still exists, so the live ruleset keeps naming its interface and
+addresses until `sudo nsplit reload`. The profile's namespace was already gone in
+the test, which limited the effect. The UID guard was correct.
+
+**[#3](https://github.com/IsaacNudeton/nsplit-linux/issues/3) — key file
+ownership.** `--ssh openssh` creates `/etc/nsplit/ssh/PROFILE/authorized_keys`,
+records its exact hash as nsplit-owned and writes a comment telling the
+administrator to add keys. After that edit the first `nsplit remove` keeps the file
+as "changed", exits 1 and leaves the profile registered. Deleting the file by hand
+and re-running finishes the removal.
+
+**Observation: OpenSSH `PerSourcePenalties`.** OpenSSH 10 drops further connections
+from an address for roughly 15 seconds after refused attempts. Every host-side login
+to a namespace server arrives from the profile's single host-side link address, so
+a burst of refused attempts by one host user delays all host-side logins. nsplit
+does not configure this.
 
 ## What is not claimed
 
-- `--ssh openssh` and `--ssh tailscale` (above) were not tested.
+- `--ssh tailscale` was not tested, and `--ssh openssh` only as scoped above.
 - A fresh `nsplit add` on the final -12 guest package, a graphical desktop run on
   that package, or an installation on the real workstation was not demonstrated
   by the final acceptance program. Earlier-version and controlled tests retain

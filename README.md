@@ -52,15 +52,36 @@ Plasma login manager's PAM configuration whichever `--ssh` mode is chosen, so
 nsplit does not yet fit a headless server without it. The repository also
 includes a NetworkManager dispatcher hook and optional ufw integration.
 
-## Implemented, but not validated
+## Remote shell options and known issues
 
 Enrollment accepts `--ssh none` (the default), `--ssh openssh` (a separate
 OpenSSH server inside the profile's namespace) and `--ssh tailscale` (Tailscale
-SSH on the profile's node). **`--ssh openssh` and `--ssh tailscale` exist in the
-code but have not yet been validated in a guest**; no test in the reviewed
-baseline enabled either. Treat both as unproven, and do not rely on them for
-remote access. The host's own SSH server is not changed by nsplit and is not a
-way into a profile. See [validation and limits](docs/VALIDATION.md).
+SSH on the profile's node).
+
+- **`--ssh openssh` has had one focused guest test, not an acceptance program.**
+  One throwaway profile on the reviewed baseline package: public-key login over
+  the profile's private link, the session's user, namespace and Tailscale-socket
+  view, refusal of root and of other accounts, forwarding refused, one reboot, and
+  removal. It also found the known issues below. It did not cover a Tailscale
+  sign-in, a connection over the profile's tailnet or a graphical session.
+- **`--ssh tailscale` has not been validated.** It exists in the code; no guest
+  profile used it and nothing connected through it.
+- The host's own SSH server is not changed by nsplit and is not a way into a profile.
+
+See [validation and limits](docs/VALIDATION.md) for exactly what was and was not shown.
+
+### Known issues
+
+These are open and unfixed in this snapshot. Read them before enrolling anyone
+whose isolation matters.
+
+| Issue | What happens |
+| --- | --- |
+| [#1](https://github.com/IsaacNudeton/nsplit-linux/issues/1) | A running profile service or user manager can **lose the bind mounts** that give it the profile's `/etc/resolv.conf` and `/run/tailscale` when the host replaces those paths (a rewrite of `/etc/resolv.conf`, seen after a boot with NetworkManager; the host's own `tailscaled` recreating `/run/tailscale`). It then sees the host's versions. `nsplit status` does not notice. A read-only look at a long-running deployment of the same bind-mount design found the same missing mounts. |
+| [#2](https://github.com/IsaacNudeton/nsplit-linux/issues/2) | `nsplit remove` leaves the removed profile's rules in the **live** firewall until the next `nsplit reload`. |
+| [#3](https://github.com/IsaacNudeton/nsplit-linux/issues/3) | After following the generated key file's own instruction (adding keys to it), the first `nsplit remove` keeps the file, exits 1 and has to be run again. |
+
+Checking and working around #1 is described in [validation](docs/VALIDATION.md#known-issues).
 
 Enrollment changes login/network configuration and requires an administrator.
 The target account must be logged out, with no running user manager; programs
