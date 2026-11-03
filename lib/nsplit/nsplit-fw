@@ -10,8 +10,19 @@ vhs=(); src=(); dst=(); ups=()
 if [ "${1:-}" = up ]; then
 	# shellcheck disable=SC1091
 	. "$ETC/nsplit.conf"
-	for f in "$PROF"/*.env; do
-		[ -e "$f" ] || continue
+	# The profiles the firewall covers are the ones in $ETC/firewall-profiles, the list nsplit regenerates whenever a profile is added or removed, so that
+	# a profile that is being removed can be left out while its record still exists. An installation from before that list existed has none: every record counts.
+	files=(); listed=""
+	if [ -r "$ETC/firewall-profiles" ]; then
+		listed=1
+		while IFS= read -r n; do
+			[ -n "$n" ] || continue
+			[[ $n =~ ^[a-z][a-z0-9_-]{0,11}$ ]] || { echo "nsplit-fw: ignoring the entry '$n' in $ETC/firewall-profiles (not a profile name)" >&2; continue; }
+			files+=("$PROF/$n.env")
+		done < "$ETC/firewall-profiles"
+	else files=("$PROF"/*.env); fi
+	for f in "${files[@]}"; do
+		if [ ! -e "$f" ]; then [ -z "$listed" ] || echo "nsplit-fw: no profile record $f; skipped" >&2; continue; fi
 		read -r vh nip hip < <(. "$f"; printf '%s %s %s\n' "$VH" "$NS_IP" "$HOST_IP")
 		vhs+=("$vh"); src+=("\"$vh\" . $nip"); dst+=("\"$vh\" . $hip")
 	done
