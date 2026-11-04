@@ -189,11 +189,21 @@ be read as root, so an ordinary user's `nsplit mounts check` reports `UNKNOWN`.
 Limits to know about:
 
 - Between the host event and the repair (normally a few seconds) the service still
-  sees the host's files. nsplit's firewall rules already drop traffic from a profile's
-  namespace to private address ranges, so a host resolver on a private address or the
-  `127.0.0.53` stub cannot be reached from the namespace; a host `resolv.conf` that
-  lists a **public** resolver could be asked about profile-private names during that
-  window.
+  sees the host's files, and two things follow:
+  - **Names** are looked up through the host's `resolv.conf`. nsplit's firewall already
+    drops traffic from a profile's namespace to private address ranges, so a host resolver
+    on a private address or the `127.0.0.53` stub cannot be reached; a host `resolv.conf`
+    that lists a **public** resolver could be asked about profile-private names.
+  - **The Tailscale control path** `/run/tailscale/tailscaled.sock`, which a profile
+    process uses by default, resolves to the **host** daemon's socket instead of the
+    profile's. What a profile user could do against the host daemon through it is decided by
+    Tailscale's own operator and peer-credential checks and has not been measured; the
+    separation the profile is meant to give is broken for as long as the mount is gone.
+- A running service whose own unit definition no longer declares one of these binds (for
+  example after an unreviewed edit of a drop-in) is reported as `NOT-DECLARED`: that makes
+  the profile Degraded and the command exit 2. nsplit never attaches a bind that the
+  unit does not declare, and never attaches anything to a user manager or service that is
+  not inside the profile's network namespace.
 - A package upgrade installs the watcher units but does not switch them on; the next
   `nsplit add`, `nsplit remove` or `nsplit start` does (it is switched off again when
   the last profile is removed).
