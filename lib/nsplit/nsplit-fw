@@ -11,19 +11,28 @@ if [ "${1:-}" = up ]; then
 	# shellcheck disable=SC1091
 	. "$ETC/nsplit.conf"
 	# The profiles the firewall covers are the ones in $ETC/firewall-profiles, the list nsplit regenerates whenever a profile is added or removed, so that
-	# a profile that is being removed can be left out while its record still exists. An installation from before that list existed has none: every record counts.
-	files=(); listed=""
-	if [ -r "$ETC/firewall-profiles" ]; then
-		listed=1
-		while IFS= read -r n; do
-			[ -n "$n" ] || continue
-			[[ $n =~ ^[a-z][a-z0-9_-]{0,11}$ ]] || { echo "nsplit-fw: ignoring the entry '$n' in $ETC/firewall-profiles (not a profile name)" >&2; continue; }
+	# a profile that is being removed can be left out while its record still exists. An installation from before that list existed has NONE: every record counts.
+	# An existing list is trusted completely or not at all. A line that is not a profile name, a name listed twice, a name without a readable record, or a list
+	# that names nothing while records exist means the list is damaged: `up` then FAILS before it touches anything (a reload keeps the rules already loaded, a
+	# first start loads nothing and enables no forwarding) instead of loading a narrower ruleset than the one the administrator has.
+	bad() { echo "nsplit-fw: $1 (nothing was loaded or changed)" >&2; [ -z "${2:-}" ] || echo "nsplit-fw: $2" >&2; exit 1; }
+	files=(); FWL=$ETC/firewall-profiles; H="to recover: repair $FWL, or delete it so that every profile record is used, then run: nsplit reload"
+	if [ -e "$FWL" ] || [ -L "$FWL" ]; then
+		[ -f "$FWL" ] && [ -r "$FWL" ] || bad "cannot read the profile list $FWL" "$H"
+		seen=" "
+		while IFS= read -r n || [ -n "$n" ]; do
+			[[ $n =~ ^[a-z][a-z0-9_-]{0,11}$ ]] || bad "the profile list $FWL has an entry that is not a profile name: '$n'" "$H"
+			case $seen in *" $n "*) bad "the profile list $FWL names '$n' twice" "$H" ;; esac
+			seen+="$n "
+			[ -r "$PROF/$n.env" ] || bad "the profile list $FWL names '$n' but there is no readable record $PROF/$n.env" "$H"
 			files+=("$PROF/$n.env")
-		done < "$ETC/firewall-profiles"
+		done < "$FWL"
+		[ ${#files[@]} -gt 0 ] || ! compgen -G "$PROF/*.env" >/dev/null || bad "the profile list $FWL names no profile although profile records exist" "$H"
 	else files=("$PROF"/*.env); fi
 	for f in "${files[@]}"; do
-		if [ ! -e "$f" ]; then [ -z "$listed" ] || echo "nsplit-fw: no profile record $f; skipped" >&2; continue; fi
-		read -r vh nip hip < <(. "$f"; printf '%s %s %s\n' "$VH" "$NS_IP" "$HOST_IP")
+		[ -e "$f" ] || continue   # only the unmatched pattern of an installation without records
+		read -r vh nip hip < <(. "$f"; printf '%s %s %s\n' "${VH:-}" "${NS_IP:-}" "${HOST_IP:-}")
+		[ -n "${vh:-}" ] && [ -n "${nip:-}" ] && [ -n "${hip:-}" ] || bad "the profile record $f does not define VH, NS_IP and HOST_IP"
 		vhs+=("$vh"); src+=("\"$vh\" . $nip"); dst+=("\"$vh\" . $hip")
 	done
 	[ ${#vhs[@]} -gt 0 ] || { echo "nsplit-fw: no profiles configured; nothing to load" >&2; exit 0; }
