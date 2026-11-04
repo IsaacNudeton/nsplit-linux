@@ -116,7 +116,7 @@ nsplit status -v demo
 sudo nsplit status -v demo
 ```
 
-Status is read-only. An ordinary user can see `UNKNOWN` or `Not checked` because
+Status is read-only. It also reads the mount tables of the running services (see [Lost profile mounts](#lost-profile-mounts)). An ordinary user can see `UNKNOWN` or `Not checked` because
 some observations require administrator rights. This does not itself mean that
 the profile is broken, and it does not justify granting broader sudo access.
 
@@ -141,6 +141,7 @@ showing the reason. The console path has different placement behavior; see
 | `nsplit uplinks` | Show configured and discovered physical uplinks |
 | `sudo nsplit uplinks --set "IFACE IFACE"` | Set existing uplinks and reload rules; substitute actual interface names |
 | `sudo nsplit reload` | Reapply managed firewall/forwarding configuration while the firewall is running |
+| `sudo nsplit mounts [check\|repair] [demo]` | Check, or re-attach, the profile's private `/etc/resolv.conf` and `/run/tailscale` in its **running** services (see below) |
 
 Stopping a namespace ends processes inside it. Repairing an unsafe active socket
 can interrupt that profile's connections, including SSH. `start --all` and
@@ -152,6 +153,56 @@ verify status. After **known prior exposure**, explicitly restart the affected
 `nsplit-tailscaled@PROFILE.service`: a current link count of one cannot reveal
 an older connected client. Do not modify permissions by hand and assume that
 connections have been revoked.
+
+## Lost profile mounts
+
+A profile's running services (its Tailscale daemon, its namespace SSH server when
+enabled, and the user's session manager) see the profile's own `/etc/resolv.conf` and
+`/run/tailscale` through bind mounts. A bind mount belongs to the file or directory
+it was made on. If the host replaces that file (NetworkManager rewrites
+`/etc/resolv.conf`) or recreates that directory (the host's `tailscaled` is stopped,
+started or restarted), services that were already running lose the mount and
+silently see the host's version, while their units still say `active`. A fresh
+process still looks correct, so only the running services' own mount tables show it.
+
+`nsplit status` reads those mount tables. A lost mount makes the profile
+**Degraded** (it is not hidden behind `Needs sign-in`); a view that cannot be read
+makes it **Not checked**. Neither is `Ready`.
+
+nsplit also repairs this by itself. `nsplit-mounts.path` reacts to a change of
+`/etc/resolv.conf` or `/run/tailscale`, `nsplit-mounts.timer` checks again 2 minutes
+after boot and then every 15 minutes as a safety net, and `sudo nsplit start` checks
+too. A missing mount is re-attached into the **running** service with
+`systemctl bind`; nothing is restarted and nobody is logged out. Every repair is
+checked again and is only reported as `REPAIRED` if the check afterwards says
+`MATCH`.
+
+```sh
+sudo nsplit mounts check          # all profiles; MATCH, MISMATCH (lost) or UNKNOWN per service and path
+sudo nsplit mounts repair demo    # re-attach now, for one profile
+```
+
+Exit status: `0` everything matches (or was repaired); `2` a mount is missing or a
+repair failed; `3` something could not be read. What a running service sees can only
+be read as root, so an ordinary user's `nsplit mounts check` reports `UNKNOWN`.
+
+Limits to know about:
+
+- Between the host event and the repair (normally a few seconds) the service still
+  sees the host's files. nsplit's firewall rules already drop traffic from a profile's
+  namespace to private address ranges, so a host resolver on a private address or the
+  `127.0.0.53` stub cannot be reached from the namespace; a host `resolv.conf` that
+  lists a **public** resolver could be asked about profile-private names during that
+  window.
+- A package upgrade installs the watcher units but does not switch them on; the next
+  `nsplit add`, `nsplit remove` or `nsplit start` does (it is switched off again when
+  the last profile is removed).
+- If the host's `tailscaled` is stopped, systemd removes `/run/tailscale`; the repair then first creates it empty (root, mode 755) so there is a mountpoint to attach to.
+- Only the three services above are covered, and only these two mounts. The repair
+  changes no DNS or Tailscale setting and no authentication.
+- If a repair cannot be completed it is reported as `FAILED`, the service keeps
+  running, `nsplit status` keeps showing the profile as not ready, and
+  `nsplit-mounts.service` exits with status 2 (systemd reports that as a failed unit).
 
 ## Remove a profile, not its user
 
