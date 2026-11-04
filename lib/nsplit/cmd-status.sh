@@ -7,7 +7,7 @@ usage: nsplit status [-v] [PROFILE]
   -v   also list every individual check (PASS / FAIL / UNKNOWN)
   Exit status: 0 if every profile shown is Ready; 2 if a profile it could check is not Ready; 3 if everything it could check is Ready but some profile could not be checked (Not checked).
   Some checks need root, and a profile's Tailscale daemon is reachable only by its owner and administrators: what a check cannot read is shown as UNKNOWN or Not checked, never as fine and never as broken.
-  The mount tables of the running services (daemon, namespace sshd, user manager) are read too: a lost private /etc/resolv.conf or /run/tailscale is Degraded, one that cannot be read (needs root) is Not checked.
+  The mount tables of the running services (daemon, namespace sshd, user manager) are read too: a lost private /etc/resolv.conf or /run/tailscale, or a running service whose unit no longer declares it, is Degraded; one that cannot be read (needs root) is Not checked.
   Current DNS resolution is checked inside the profile's namespace when run as root. Without those rights, configured DNS is shown separately from unverified current resolution; status never invokes the mutating login helper.
 EOF2
 }
@@ -201,6 +201,8 @@ profile_status() {
 			MATCH) mmatch=$((mmatch+1));;
 			MISMATCH) chk FAIL "profile mounts: $munit has lost its private $mdest ($mwhy)"
 				[ -n "$secfail" ] || secfail="a running service of this profile lost its private $mdest ($munit); an administrator can re-attach it without restarting anything: sudo nsplit mounts repair $n";;
+			NOT-DECLARED) chk FAIL "profile mounts: $munit is running but its definition no longer declares the private $mdest ($mwhy)"
+				[ -n "$secfail" ] || secfail="a running service of this profile ($munit) no longer declares its private $mdest bind: its unit definition was changed; an administrator must restore it (nsplit will not attach a bind its unit does not declare)";;
 			UNKNOWN) chk UNKNOWN "profile mounts: $munit $mdest ($mwhy)"; unverified=1;;
 			esac
 		done <<<"$mrows"
