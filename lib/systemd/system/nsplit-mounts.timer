@@ -1,0 +1,13 @@
+[Unit]
+Description=nsplit: safety net for the profile mounts (a replacement the path watcher did not see, and boot ordering)
+Documentation=https://github.com/IsaacNudeton/nsplit-linux/issues/1
+
+[Timer]
+# The path watcher is the fast trigger. This only covers an event that landed while a repair was finishing, and the start of the system (a host path replaced before the watcher was up).
+OnBootSec=2min
+OnUnitInactiveSec=15min
+AccuracySec=1min
+Unit=nsplit-mounts.service
+
+[Install]
+WantedBy=timers.target

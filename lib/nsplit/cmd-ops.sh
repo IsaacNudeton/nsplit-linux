@@ -79,6 +79,9 @@ cmd_start() {
 		[ "$P_SSH" = openssh ] && { $SYSTEMCTL start "nsplit-sshd@$n.service" || warn "the namespace sshd for $n did not start"; }
 		say "started $n"
 	done
+	# the start boundary: a service of ANY profile that was already running may have lost a mount while the host paths were replaced (nothing is restarted by this)
+	mounts_refresh || warn "could not switch the mount watcher (nsplit-mounts.path, nsplit-mounts.timer); look with: nsplit mounts check"
+	"$LIB/nsplit-mounts" repair --auto || { [ $? != 2 ] || warn "a profile mount is not in place and could not be repaired: nsplit mounts check"; }
 }
 
 usage_stop() { cat <<'EOF2'

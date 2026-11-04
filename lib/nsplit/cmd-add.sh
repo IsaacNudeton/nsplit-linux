@@ -226,6 +226,7 @@ pam_login_restore() { cat "$1" > "$PAMDIR/login"; rm -f "$1"; }
 
 # ---- the steps ------------------------------------------------------------------------------------------------------------
 fw_refresh() { # make the firewall reflect the profiles that exist now: none = stop and disable it; otherwise start it or reload it
+	mounts_refresh || warn "could not switch the mount watcher (nsplit-mounts.path, nsplit-mounts.timer); look with: nsplit mounts check"
 	if [ -z "$(profile_names)" ]; then $SYSTEMCTL disable --now nsplit-firewall.service; return; fi
 	if unit_active nsplit-firewall.service; then $SYSTEMCTL reload nsplit-firewall.service; else $SYSTEMCTL enable --now nsplit-firewall.service; fi; }
 guard_refresh() { # load the guard file as it is now (atomic reload), or remove the guard when no profile is left
@@ -271,7 +272,7 @@ step_start() {
 	else undo_push "$LIB/nsplit-ufw" del "$NAME"; "$LIB/nsplit-ufw" add "$NAME" || die "could not add the ufw route rules"; fi
 	[ "$DRY" = 1 ] || undo_push $SYSTEMCTL disable --now "nsplit-netns@$NAME.service"
 	run $SYSTEMCTL enable --now "nsplit-netns@$NAME.service" || die "the namespace for $NAME did not start (see: journalctl -u nsplit-netns@$NAME)"
-	if [ "$DRY" = 1 ]; then printf '    would run: %s enable --now nsplit-firewall.service   (or reload it if it is already active)\n' "$SYSTEMCTL"
+	if [ "$DRY" = 1 ]; then printf '    would run: %s enable --now nsplit-firewall.service   (or reload it if it is already active)\n' "$SYSTEMCTL"; printf '    would run: %s enable --now nsplit-mounts.path nsplit-mounts.timer   (re-attaches the profile mounts if the host replaces /etc/resolv.conf or /run/tailscale)\n' "$SYSTEMCTL"
 	else fw_refresh || die "the firewall did not start"; fi
 	if [ ! -e "$STATEMARK/$NAME" ] && [ "$DRY" != 1 ]; then
 		mkdir -p "$STATEMARK"; : > "$STATEMARK/$NAME"; MARK_MADE=1

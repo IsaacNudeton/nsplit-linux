@@ -1,0 +1,148 @@
+#!/bin/bash -p
+# nsplit-mounts check|repair [--machine] [--auto] [PROFILE...]   (internal helper; people use `nsplit mounts`. Run as root by nsplit-mounts.service, the NetworkManager hook and `nsplit start`.)
+# A profile's services see a private /etc/resolv.conf and a private /run/tailscale through two bind mounts that their units declare:
+#     BindReadOnlyPaths=/etc/netns/netns-P/resolv.conf:/etc/resolv.conf        BindPaths=/run/tailscale-P:/run/tailscale
+# A bind mount is attached to the OBJECT it was made on. When the host later replaces that object (NetworkManager rewrites /etc/resolv.conf by rename; a host tailscaled restart removes and
+# re-creates /run/tailscale) the kernel silently drops the mount in every running mount namespace. The unit stays "active", and the service now sees the host's file or directory instead of the
+# profile's. A fresh process (the probe `nsplit status` used to rely on) gets correct mounts, so only the long-running consumers are affected:
+#     nsplit-tailscaled@P.service    nsplit-sshd@P.service (when active)    user@UID.service (when active)
+#   check   for each active consumer that declares the two binds: how many mounts its MAIN PROCESS has at the destination (/proc/PID/mountinfo) and which object it really sees there
+#           (/proc/PID/root/DEST, compared by device:inode with the source). Per destination: MATCH, MISMATCH or UNKNOWN. A missing mount is MISMATCH, never an inferred match; anything that could not
+#           be read (the service's view needs root) is UNKNOWN, never MATCH.
+#   repair  `systemctl bind [--read-only] UNIT SOURCE DESTINATION` for MISMATCH only: it re-attaches the source in the RUNNING unit's mount namespace and (for a user manager) in the services
+#           it started. Nothing is restarted, signalled or logged out. Every repair is CHECKED AGAIN afterwards: REPAIRED only if the re-check says MATCH, otherwise FAILED. A failed bind
+#           leaves the unit running. It never touches a unit that is not active, a source it cannot verify, or a destination the unit does not declare. (If the host's /run/tailscale is absent because
+#           the host's tailscaled is stopped, it first creates it empty: a bind needs a mountpoint.)
+#   --machine  tab-separated rows (STATE PROFILE UNIT DEST MOUNTS DETAIL) for other programs;  --auto  quiet when everything is fine, a second pass after one second for events that landed during the first.
+# Exit status: 0 everything MATCH (or repaired);  2 a MISMATCH or FAILED remains;  3 something is UNKNOWN (and nothing MISMATCH);  1 unusable input;  4 repair without root;  64 usage.
+# Nothing here reads the caller's environment, except for off-host tests: NSPLIT_TEST with NSPLIT_ETC / NSPLIT_NETNS_ETC / NSPLIT_TS_RUN / NSPLIT_RUN / NSPLIT_PROC / NSPLIT_SYSTEMCTL / NSPLIT_LOCK_WAIT / NSPLIT_HOST_ROOT are honoured ONLY when not root.
+builtin unset -f $(builtin compgen -A function) 2>/dev/null
+PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+set -uo pipefail
+umask 022
+ETC=/etc/nsplit; NETNSETC=/etc/netns; TSRUN=/run; RUN=/run/nsplit; PROC=/proc; SYSTEMCTL=/usr/bin/systemctl; LOCKWAIT=120; HOSTROOT=; TESTMODE=
+if [ "$(id -u)" != 0 ] && [ -n "${NSPLIT_TEST:-}" ]; then
+	TESTMODE=1; ETC=${NSPLIT_ETC:-$ETC}; NETNSETC=${NSPLIT_NETNS_ETC:-$NETNSETC}; TSRUN=${NSPLIT_TS_RUN:-$TSRUN}; RUN=${NSPLIT_RUN:-$RUN}; PROC=${NSPLIT_PROC:-$PROC}; SYSTEMCTL=${NSPLIT_SYSTEMCTL:-$SYSTEMCTL}; LOCKWAIT=${NSPLIT_LOCK_WAIT:-$LOCKWAIT}; HOSTROOT=${NSPLIT_HOST_ROOT:-}
+fi
+usage() { echo "usage: nsplit-mounts check|repair [--machine] [--auto] [PROFILE...]" >&2; exit 64; }
+[ $# -ge 1 ] || usage
+mode=$1; shift
+case $mode in check|repair) ;; *) usage;; esac
+machine=""; auto=""; names=()
+while [ $# -gt 0 ]; do case $1 in --machine) machine=1;; --auto) auto=1;; -*) usage;; *) names+=("$1");; esac; shift; done
+[ -z "$auto" ] || [ "$mode" = repair ] || usage
+if [ "$mode" = repair ] && [ "$(id -u)" != 0 ] && [ -z "$TESTMODE" ]; then echo "nsplit-mounts: repair needs root" >&2; exit 4; fi
+
+valid_name() { [[ $1 =~ ^[a-z][a-z0-9_-]{0,11}$ ]]; }
+# the profiles to look at: the ones named, or every record. A record that is not a plain profile name is never followed.
+if [ ${#names[@]} -eq 0 ]; then
+	for f in "$ETC"/profiles/*.env; do [ -e "$f" ] || continue; n=${f##*/}; n=${n%.env}; valid_name "$n" && names+=("$n"); done
+fi
+for n in "${names[@]}"; do valid_name "$n" || { echo "nsplit-mounts: '$n' is not a profile name" >&2; exit 1; }; done
+[ ${#names[@]} -gt 0 ] || { [ -n "$auto" ] || [ -n "$machine" ] || echo "nsplit-mounts: no profiles"; exit 0; }
+
+rows=()
+add_row() { local IFS=$'\t'; rows+=("$*"); }   # STATE PROFILE UNIT DEST MOUNTS DETAIL
+
+read_profile() { # NAME -> P_UID, P_NS from the root-owned record; the namespace name must be the one nsplit derives from the profile name
+	local f=$ETC/profiles/$1.env
+	[ -r "$f" ] || return 1
+	eval "$( . "$f" 2>/dev/null; printf 'P_UID=%q P_NS=%q' "${UIDN:-}" "${NS:-}" )"
+	[[ $P_UID =~ ^[0-9]+$ ]] && [ "$P_UID" -gt 0 ] && [ "$P_NS" = "netns-$1" ]
+}
+unit_info() { # UNIT -> U_STATE U_PID U_BINDS
+	local o
+	o=$("$SYSTEMCTL" show -p ActiveState -p MainPID -p BindPaths -p BindReadOnlyPaths -- "$1" 2>/dev/null) || return 1
+	U_STATE=$(sed -n 's/^ActiveState=//p' <<<"$o"); U_PID=$(sed -n 's/^MainPID=//p' <<<"$o")
+	U_BINDS=$(sed -n -e 's/^BindPaths=//p' -e 's/^BindReadOnlyPaths=//p' <<<"$o" | tr '\n' ' ')
+	[ -n "$U_STATE" ]
+}
+declares() { local t; for t in $U_BINDS; do t=${t#-}; case $t in "$1:$2"|"$1:$2":*) return 0;; esac; done; return 1; }   # SRC DEST: the unit declares exactly this bind
+judge() { # PID SRC DEST file|dir -> J_STATE J_N J_WHY
+	local pid=$1 src=$2 dest=$3 kind=$4 want got mi
+	J_STATE=UNKNOWN; J_N='?'
+	if [ "$kind" = file ]; then [ -f "$src" ] && [ ! -L "$src" ] || { J_WHY="the source $src is not a regular file"; return 0; }
+	else [ -d "$src" ] && [ ! -L "$src" ] || { J_WHY="the source $src is not a directory"; return 0; }; fi
+	want=$(stat -c %d:%i -- "$src" 2>/dev/null) || { J_WHY="cannot read the source $src"; return 0; }
+	mi=$PROC/$pid/mountinfo
+	[ -r "$mi" ] || { J_WHY="cannot read the mount table of process $pid"; return 0; }
+	J_N=$(awk -v d="$dest" '$5 == d' "$mi" 2>/dev/null | wc -l)
+	if [ "$J_N" = 0 ]; then J_STATE=MISMATCH; J_WHY="no mount at $dest in the service's mount table"; return 0; fi
+	got=$(stat -L -c %d:%i -- "$PROC/$pid/root$dest" 2>/dev/null) || { J_WHY="a mount exists at $dest but what the service sees there cannot be read (needs root); its identity is unverified"; return 0; }
+	if [ "$got" = "$want" ]; then J_STATE=MATCH; J_WHY="the visible object is the source (device:inode $want)"
+	else J_STATE=MISMATCH; J_WHY="a mount exists but the visible object is not the source (sees $got, source is $want)"; fi
+}
+inspect() { # PROFILE UNIT -> rows
+	local p=$1 unit=$2 d src dest kind
+	unit_info "$unit" || { add_row UNKNOWN "$p" "$unit" - '?' "systemctl could not describe the unit"; return 0; }
+	case $U_STATE in
+	active) ;;
+	inactive|failed) add_row NOT-RUNNING "$p" "$unit" - - "the unit is $U_STATE"; return 0;;
+	*) add_row UNKNOWN "$p" "$unit" - '?' "the unit is $U_STATE (changing state); try again"; return 0;;
+	esac
+	for d in resolv tsdir; do
+		if [ $d = resolv ]; then src=$NETNSETC/$P_NS/resolv.conf; dest=/etc/resolv.conf; kind=file; else src=$TSRUN/tailscale-$p; dest=/run/tailscale; kind=dir; fi
+		declares "$src" "$dest" || { add_row NOT-DECLARED "$p" "$unit" "$dest" - "the unit does not declare this bind"; continue; }
+		if ! [[ $U_PID =~ ^[0-9]+$ ]] || [ "$U_PID" -le 1 ]; then add_row UNKNOWN "$p" "$unit" "$dest" '?' "the unit is active but has no main process to inspect"; continue; fi
+		judge "$U_PID" "$src" "$dest" "$kind"
+		add_row "$J_STATE" "$p" "$unit" "$dest" "$J_N" "$J_WHY"
+	done
+}
+collect() { local p; rows=(); for p in "${names[@]}"; do
+	read_profile "$p" || { add_row UNKNOWN "$p" - - '?' "the profile record is missing or not a valid nsplit record"; continue; }
+	inspect "$p" "nsplit-tailscaled@$p.service"; inspect "$p" "nsplit-sshd@$p.service"; inspect "$p" "user@$P_UID.service"
+done; }
+field() { awk -F'\t' -v n="$2" '{print $n}' <<<"$1"; }   # ROW N
+
+bindres=()   # "UNIT|DEST|rc|message" for every bind attempted
+run_repair() { # one pass: check, bind every MISMATCH, check again; rows = the result
+	local r st p unit dest src ro out rc b k
+	bindres=(); collect
+	for r in "${rows[@]}"; do
+		[ "$(field "$r" 1)" = MISMATCH ] || continue
+		p=$(field "$r" 2); unit=$(field "$r" 3); dest=$(field "$r" 4)
+		read_profile "$p" || continue
+		if [ "$dest" = /etc/resolv.conf ]; then src=$NETNSETC/$P_NS/resolv.conf; ro=--read-only; else src=$TSRUN/tailscale-$p; ro=; fi
+		# While the host's tailscaled is stopped, systemd has removed /run/tailscale, and a bind needs a mountpoint: create it empty, root-owned, 0755 (what the host daemon's RuntimeDirectory= makes and
+		# what systemd itself makes for a unit's BindPaths= to a missing destination). Anything that exists there, even a dangling link, is left alone.
+		if [ "$dest" = /run/tailscale ] && [ ! -e "$HOSTROOT$dest" ] && [ ! -L "$HOSTROOT$dest" ]; then mkdir -m 0755 -- "$HOSTROOT$dest" 2>/dev/null; fi
+		# shellcheck disable=SC2086
+		out=$("$SYSTEMCTL" bind $ro -- "$unit" "$src" "$dest" 2>&1); rc=$?
+		bindres+=("$unit|$dest|$rc|$(tr '\n' ' ' <<<"$out" | cut -c1-120)")
+	done
+	[ ${#bindres[@]} -gt 0 ] || return 0
+	collect
+	for k in "${!rows[@]}"; do
+		r=${rows[$k]}; unit=$(field "$r" 3); dest=$(field "$r" 4); st=$(field "$r" 1)
+		for b in "${bindres[@]}"; do
+			[ "${b%%|*}" = "$unit" ] || continue; b=${b#*|}; [ "${b%%|*}" = "$dest" ] || continue; b=${b#*|}
+			rc=${b%%|*}; out=${b#*|}
+			if [ "$st" = MATCH ]; then rows[$k]=$(printf '%s\t%s\t%s\t%s\t%s\tsystemctl bind exit %s; re-check: %s' REPAIRED "$(field "$r" 2)" "$unit" "$dest" "$(field "$r" 5)" "$rc" "$(field "$r" 6)")
+			else rows[$k]=$(printf '%s\t%s\t%s\t%s\t%s\tsystemctl bind exit %s (%s); re-check says %s: %s' FAILED "$(field "$r" 2)" "$unit" "$dest" "$(field "$r" 5)" "$rc" "${out:-no message}" "$st" "$(field "$r" 6)"); fi
+		done
+	done
+}
+quiet_state() { case $1 in MATCH|NOT-RUNNING|NOT-DECLARED) return 0;; esac; return 1; }
+show() { # rows -> stdout
+	local r st
+	for r in "${rows[@]}"; do
+		st=$(field "$r" 1)
+		[ -z "$auto" ] || ! quiet_state "$st" || continue
+		if [ -n "$machine" ]; then printf '%s\n' "$r"
+		else printf '%-12s %-8s %-34s %-17s mounts=%-2s %s\n' "$st" "$(field "$r" 2)" "$(field "$r" 3)" "$(field "$r" 4)" "$(field "$r" 5)" "$(field "$r" 6)"; fi
+	done
+}
+status_of() { local r st bad=0 unk=0; for r in "${rows[@]}"; do st=$(field "$r" 1); case $st in MISMATCH|FAILED) bad=1;; UNKNOWN) unk=1;; esac; done
+	[ $bad = 1 ] && return 2; [ $unk = 1 ] && return 3; return 0; }
+
+if [ "$mode" = check ]; then
+	collect; show; status_of; exit $?
+fi
+mkdir -p "$RUN" 2>/dev/null || { echo "nsplit-mounts: cannot create $RUN" >&2; exit 1; }
+exec 9> "$RUN/mounts.lock" || { echo "nsplit-mounts: cannot open the lock file in $RUN" >&2; exit 1; }
+flock -w "$LOCKWAIT" 9 || { echo "nsplit-mounts: another repair has held the lock for $LOCKWAIT s; nothing done" >&2; exit 1; }
+run_repair; show; status_of; rc=$?
+if [ -n "$auto" ]; then   # an event that landed while the first pass was looking is caught by a second pass; quiet if there is nothing to do. The result is the state AFTER the last pass.
+	sleep 1; run_repair; show; status_of; rc=$?
+fi
+exit $rc
