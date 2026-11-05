@@ -291,7 +291,7 @@ step_ssh() {
 	say "  - OpenSSH inside the namespace"
 	local d=$ETC/ssh/$NAME; OWNER=$NAME
 	put "$d/sshd_config" 644 < <(subst < "$SHARE/sshd_config.in")
-	put "$d/authorized_keys" 644 < <(printf '# keys allowed to log in as %s to the namespace sshd (root-managed). The user'"'"'s own ~/.ssh/authorized_keys also works.\n' "$LOGIN")
+	# No root-managed authorized_keys is created: it is the administrator's file if they want one (see the sshd_config), so nsplit neither writes nor owns it.
 	if [ "$DRY" = 1 ]; then printf '    would create: %s/ssh_host_ed25519_key(.pub)\n' "$d"; run $SYSTEMCTL enable --now "nsplit-sshd@$NAME.service"; return 0; fi
 	if [ ! -e "$d/ssh_host_ed25519_key" ]; then
 		ssh-keygen -q -t ed25519 -N '' -C "nsplit-$NAME@$(cat /proc/sys/kernel/hostname)" -f "$d/ssh_host_ed25519_key" || die "ssh-keygen failed"

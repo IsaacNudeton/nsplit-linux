@@ -13,7 +13,8 @@ AuthenticationMethods publickey
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitEmptyPasswords no
-# root-owned key file first (keys the admin installs), then the user's own ~/.ssh/authorized_keys
+# Optional root-managed key file first: nsplit does not create it, an administrator may (root-owned, readable by the user, e.g. mode 644); nsplit never deletes it.
+# Then the user's own ~/.ssh/authorized_keys, which needs nothing from the administrator.
 AuthorizedKeysFile @ETC@/ssh/@NAME@/authorized_keys .ssh/authorized_keys
 StrictModes yes
 UsePAM yes
