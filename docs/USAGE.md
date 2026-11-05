@@ -27,9 +27,11 @@ do not weaken the check.
 
 ## Build the packaged snapshot
 
-This repository is a single-commit snapshot of nsplit **0.1.0-13**. The reviewed
-runtime baseline, 0.1.0-12, is described in [VALIDATION.md](VALIDATION.md); the
-0.1.0-13 package differs from it only by the added MIT license text.
+This repository began as a single-commit snapshot of nsplit 0.1.0-13 and is now
+nsplit **0.1.0-14**. The reviewed runtime baseline, 0.1.0-12, is described in
+[VALIDATION.md](VALIDATION.md); the 0.1.0-13 package differed from it only by the added
+MIT license text, and 0.1.0-14 adds the fixes for issues #1 to #3 (see
+[former known issues](VALIDATION.md#former-known-issues)).
 The following creates a source checkout on a new evaluation machine. For an
 existing development checkout, use that checkout rather than creating duplicates.
 
@@ -51,7 +53,7 @@ verification of an arbitrary downloaded archive.
 Install only the package you just built, in the evaluation VM:
 
 ```sh
-sudo pacman -U packaging/arch/nsplit-0.1.0-13-any.pkg.tar.zst
+sudo pacman -U packaging/arch/nsplit-0.1.0-14-any.pkg.tar.zst
 pacman -Q nsplit
 nsplit --version
 ```
@@ -225,11 +227,24 @@ sudo nsplit remove demo --dry-run
 sudo nsplit remove demo
 ```
 
-Known issues affect removal while they are open: the live firewall can keep the
-removed profile's rules until `sudo nsplit reload` ([#2](https://github.com/IsaacNudeton/nsplit-linux/issues/2)),
-and a key file you edited under `/etc/nsplit/ssh/PROFILE/` makes the first removal
-exit 1 ([#3](https://github.com/IsaacNudeton/nsplit-linux/issues/3)): keep a copy
-of the keys, delete that file and run the removal again.
+Removal regenerates the firewall without the removed profile, so its rules are gone
+from the live ruleset when `remove` finishes ([#2](https://github.com/IsaacNudeton/nsplit-linux/issues/2)).
+The firewall reads the profiles it forwards for from `/etc/nsplit/firewall-profiles`,
+which nsplit regenerates together with the UID guard. If that file is damaged (an entry
+that is not a profile name, a repeated name, a name without a readable record, an empty
+list while records exist), `nsplit-fw` exits without loading anything and says so. At boot
+that means no profile daemon starts until the list is repaired; to recover, repair the
+file or delete it so that every profile record is used, then run `sudo nsplit reload`.
+An installation from before this change has no list and keeps working from the profile
+records until its next `add` or `remove` writes one.
+
+A root-managed key file for the namespace OpenSSH server
+(`/etc/nsplit/ssh/PROFILE/authorized_keys`) is the administrator's: nsplit does not create
+it, never deletes it, and reports it as kept; that is not an error
+([#3](https://github.com/IsaacNudeton/nsplit-linux/issues/3)). A profile enrolled by
+0.1.0-12 or -13 has such a file recorded as nsplit's own: if keys were added to it, removal
+keeps it; if it is still exactly what nsplit wrote (it holds no keys), removal deletes it
+with the rest.
 
 Removal takes away the managed profile configuration, not the local account or
 home directory. Files changed outside nsplit are kept and reported rather than
