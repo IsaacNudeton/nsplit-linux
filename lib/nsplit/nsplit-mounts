@@ -17,7 +17,8 @@
 #   An ACTIVE consumer whose unit no longer declares an expected bind is NOT-DECLARED: that is a failure (exit 2, `nsplit status` Degraded), never success, and it is never repaired (nothing attaches a bind the
 #   unit does not declare). A user manager with no profile placement at all (no NetworkNamespacePath) is NO-PLACEMENT, and one that is not inside the profile's network namespace is NOT-PLACED: both are
 #   quiet here because `nsplit status` reports an unplaced manager itself, and neither is ever repaired (a bind into a service that was never placed would half-apply the profile). A daemon or sshd outside
-#   its namespace is UNKNOWN.
+#   its namespace is UNKNOWN. Placement is TRI-STATE and fails closed: if the profile's namespace handle (/run/netns/NS) or the process's own namespace identity cannot be read, the row is UNKNOWN (exit 3, printed
+#   even with --auto) and NOTHING is attached, even where a mount is plainly missing; only a verified same namespace is judged and repaired.
 # Exit status: 0 everything MATCH (or repaired);  2 a MISMATCH, FAILED or NOT-DECLARED remains;  3 something is UNKNOWN (and nothing worse);  1 unusable input;  4 repair without root;  64 usage.
 # Nothing here reads the caller's environment, except for off-host tests: NSPLIT_TEST with NSPLIT_ETC / NSPLIT_NETNS_ETC / NSPLIT_TS_RUN / NSPLIT_RUN / NSPLIT_PROC / NSPLIT_SYSTEMCTL / NSPLIT_LOCK_WAIT / NSPLIT_HOST_ROOT / NSPLIT_NETNS_RUN / NSPLIT_MOUNTS_OFF are honoured ONLY when not root.
 builtin unset -f $(builtin compgen -A function) 2>/dev/null
@@ -64,8 +65,13 @@ unit_info() { # UNIT -> U_STATE U_PID U_NS U_BINDS
 	[ -n "$U_STATE" ]
 }
 declares() { local t; for t in $U_BINDS; do t=${t#-}; case $t in "$1:$2"|"$1:$2":*) return 0;; esac; done; return 1; }   # SRC DEST: the unit declares exactly this bind
-# in_profile_ns PID : false only when we can SEE that the process is in another network namespace than the profile's (unreadable = no objection; the judging then says UNKNOWN for a non-root caller)
-in_profile_ns() { local want mine; want=$(stat -L -c %d:%i -- "$NETNSRUN/$P_NS" 2>/dev/null) || return 0; mine=$(stat -L -c %d:%i -- "$PROC/$1/ns/net" 2>/dev/null) || return 0; [ "$mine" = "$want" ]; }
+# placement PID : sets PL (same | different | unknown) and PL_WHY. FAIL CLOSED: only a namespace that we could read on both sides and that is the same object allows anything to be attached.
+# The profile's namespace handle (/run/netns/NS) or the process's own namespace identity (/proc/PID/ns/net, which needs root) that cannot be read is "unknown", never "same".
+placement() { local want mine; PL=unknown; PL_WHY=
+	want=$(stat -L -c %d:%i -- "$NETNSRUN/$P_NS" 2>/dev/null) && [[ $want =~ ^[0-9]+:[0-9]+$ ]] || { PL_WHY="the profile's network namespace $NETNSRUN/$P_NS cannot be read (missing or no access), so the service's placement is not verified"; return 0; }
+	mine=$(stat -L -c %d:%i -- "$PROC/$1/ns/net" 2>/dev/null) && [[ $mine =~ ^[0-9]+:[0-9]+$ ]] || { PL_WHY="the network namespace of process $1 cannot be read (needs root), so the service's placement is not verified"; return 0; }
+	if [ "$mine" = "$want" ]; then PL=same; else PL=different; fi
+}
 judge() { # PID SRC DEST file|dir -> J_STATE J_N J_WHY
 	local pid=$1 src=$2 dest=$3 kind=$4 want got mi
 	J_STATE=UNKNOWN; J_N='?'
@@ -81,7 +87,7 @@ judge() { # PID SRC DEST file|dir -> J_STATE J_N J_WHY
 	else J_STATE=MISMATCH; J_WHY="a mount exists but the visible object is not the source (sees $got, source is $want)"; fi
 }
 inspect() { # PROFILE UNIT -> rows
-	local p=$1 unit=$2 d src dest kind
+	local p=$1 unit=$2 d src dest kind seen
 	unit_info "$unit" || { add_row UNKNOWN "$p" "$unit" - '?' "systemctl could not describe the unit"; return 0; }
 	case $U_STATE in
 	active) ;;
@@ -97,12 +103,20 @@ inspect() { # PROFILE UNIT -> rows
 			continue
 		fi
 		if ! [[ $U_PID =~ ^[0-9]+$ ]] || [ "$U_PID" -le 1 ]; then add_row UNKNOWN "$p" "$unit" "$dest" '?' "the unit is active but has no main process to inspect"; continue; fi
-		if ! in_profile_ns "$U_PID"; then
+		placement "$U_PID"
+		case $PL in
+		same) ;;
+		different)
 			# never bind into a service that was not placed in the profile's namespace: that would give it the profile's resolver and daemon directory while it stays on the host's network
 			if [[ $unit == user@* ]]; then add_row NOT-PLACED "$p" "$unit" "$dest" - "the manager is not inside $P_NS (placement applies at its next start); nothing is attached"
 			else add_row UNKNOWN "$p" "$unit" "$dest" '?' "the service is not inside $P_NS; nothing is attached"; fi
-			continue
-		fi
+			continue;;
+		*)
+			# placement not verified: UNKNOWN, never repaired (a missing mount is mentioned, because an ordinary user can still read the mount table)
+			seen=; [ -r "$PROC/$U_PID/mountinfo" ] && seen="; its mount table shows $(awk -v d="$dest" '$5 == d' "$PROC/$U_PID/mountinfo" 2>/dev/null | wc -l) mount(s) at $dest"
+			add_row UNKNOWN "$p" "$unit" "$dest" '?' "$PL_WHY; nothing is attached$seen"
+			continue;;
+		esac
 		judge "$U_PID" "$src" "$dest" "$kind"
 		add_row "$J_STATE" "$p" "$unit" "$dest" "$J_N" "$J_WHY"
 	done

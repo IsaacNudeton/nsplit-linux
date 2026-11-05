@@ -203,7 +203,9 @@ Limits to know about:
   example after an unreviewed edit of a drop-in) is reported as `NOT-DECLARED`: that makes
   the profile Degraded and the command exit 2. nsplit never attaches a bind that the
   unit does not declare, and never attaches anything to a user manager or service that is
-  not inside the profile's network namespace.
+  not inside the profile's network namespace. If that placement cannot be verified (the
+  profile's namespace under `/run/netns` or the service's own namespace cannot be read), the
+  service is reported `UNKNOWN` and nothing is attached to it, even where a mount is missing.
 - A package upgrade installs the watcher units but does not switch them on; the next
   `nsplit add`, `nsplit remove` or `nsplit start` does (it is switched off again when
   the last profile is removed).
