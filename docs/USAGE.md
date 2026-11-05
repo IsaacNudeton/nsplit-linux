@@ -27,9 +27,11 @@ do not weaken the check.
 
 ## Build the packaged snapshot
 
-This repository is a single-commit snapshot of nsplit **0.1.0-13**. The reviewed
-runtime baseline, 0.1.0-12, is described in [VALIDATION.md](VALIDATION.md); the
-0.1.0-13 package differs from it only by the added MIT license text.
+This repository began as a single-commit snapshot of nsplit 0.1.0-13 and is now
+nsplit **0.1.0-14**. The reviewed runtime baseline, 0.1.0-12, is described in
+[VALIDATION.md](VALIDATION.md); the 0.1.0-13 package differed from it only by the added
+MIT license text, and 0.1.0-14 adds the fixes for issues #1 to #3 (see
+[former known issues](VALIDATION.md#former-known-issues)).
 The following creates a source checkout on a new evaluation machine. For an
 existing development checkout, use that checkout rather than creating duplicates.
 
@@ -51,7 +53,7 @@ verification of an arbitrary downloaded archive.
 Install only the package you just built, in the evaluation VM:
 
 ```sh
-sudo pacman -U packaging/arch/nsplit-0.1.0-13-any.pkg.tar.zst
+sudo pacman -U packaging/arch/nsplit-0.1.0-14-any.pkg.tar.zst
 pacman -Q nsplit
 nsplit --version
 ```
@@ -116,7 +118,7 @@ nsplit status -v demo
 sudo nsplit status -v demo
 ```
 
-Status is read-only. An ordinary user can see `UNKNOWN` or `Not checked` because
+Status is read-only. It also reads the mount tables of the running services (see [Lost profile mounts](#lost-profile-mounts)). An ordinary user can see `UNKNOWN` or `Not checked` because
 some observations require administrator rights. This does not itself mean that
 the profile is broken, and it does not justify granting broader sudo access.
 
@@ -141,6 +143,7 @@ showing the reason. The console path has different placement behavior; see
 | `nsplit uplinks` | Show configured and discovered physical uplinks |
 | `sudo nsplit uplinks --set "IFACE IFACE"` | Set existing uplinks and reload rules; substitute actual interface names |
 | `sudo nsplit reload` | Reapply managed firewall/forwarding configuration while the firewall is running |
+| `sudo nsplit mounts [check\|repair] [demo]` | Check, or re-attach, the profile's private `/etc/resolv.conf` and `/run/tailscale` in its **running** services (see below) |
 
 Stopping a namespace ends processes inside it. Repairing an unsafe active socket
 can interrupt that profile's connections, including SSH. `start --all` and
@@ -153,6 +156,68 @@ verify status. After **known prior exposure**, explicitly restart the affected
 an older connected client. Do not modify permissions by hand and assume that
 connections have been revoked.
 
+## Lost profile mounts
+
+A profile's running services (its Tailscale daemon, its namespace SSH server when
+enabled, and the user's session manager) see the profile's own `/etc/resolv.conf` and
+`/run/tailscale` through bind mounts. A bind mount belongs to the file or directory
+it was made on. If the host replaces that file (NetworkManager rewrites
+`/etc/resolv.conf`) or recreates that directory (the host's `tailscaled` is stopped,
+started or restarted), services that were already running lose the mount and
+silently see the host's version, while their units still say `active`. A fresh
+process still looks correct, so only the running services' own mount tables show it.
+
+`nsplit status` reads those mount tables. A lost mount makes the profile
+**Degraded** (it is not hidden behind `Needs sign-in`); a view that cannot be read
+makes it **Not checked**. Neither is `Ready`.
+
+nsplit also repairs this by itself. `nsplit-mounts.path` reacts to a change of
+`/etc/resolv.conf` or `/run/tailscale`, `nsplit-mounts.timer` checks again 2 minutes
+after boot and then every 15 minutes as a safety net, and `sudo nsplit start` checks
+too. A missing mount is re-attached into the **running** service with
+`systemctl bind`; nothing is restarted and nobody is logged out. Every repair is
+checked again and is only reported as `REPAIRED` if the check afterwards says
+`MATCH`.
+
+```sh
+sudo nsplit mounts check          # all profiles; MATCH, MISMATCH (lost) or UNKNOWN per service and path
+sudo nsplit mounts repair demo    # re-attach now, for one profile
+```
+
+Exit status: `0` everything matches (or was repaired); `2` a mount is missing or a
+repair failed; `3` something could not be read. What a running service sees can only
+be read as root, so an ordinary user's `nsplit mounts check` reports `UNKNOWN`.
+
+Limits to know about:
+
+- Between the host event and the repair (normally a few seconds) the service still
+  sees the host's files, and two things follow:
+  - **Names** are looked up through the host's `resolv.conf`. nsplit's firewall already
+    drops traffic from a profile's namespace to private address ranges, so a host resolver
+    on a private address or the `127.0.0.53` stub cannot be reached; a host `resolv.conf`
+    that lists a **public** resolver could be asked about profile-private names.
+  - **The Tailscale control path** `/run/tailscale/tailscaled.sock`, which a profile
+    process uses by default, resolves to the **host** daemon's socket instead of the
+    profile's. What a profile user could do against the host daemon through it is decided by
+    Tailscale's own operator and peer-credential checks and has not been measured; the
+    separation the profile is meant to give is broken for as long as the mount is gone.
+- A running service whose own unit definition no longer declares one of these binds (for
+  example after an unreviewed edit of a drop-in) is reported as `NOT-DECLARED`: that makes
+  the profile Degraded and the command exit 2. nsplit never attaches a bind that the
+  unit does not declare, and never attaches anything to a user manager or service that is
+  not inside the profile's network namespace. If that placement cannot be verified (the
+  profile's namespace under `/run/netns` or the service's own namespace cannot be read), the
+  service is reported `UNKNOWN` and nothing is attached to it, even where a mount is missing.
+- A package upgrade installs the watcher units but does not switch them on; the next
+  `nsplit add`, `nsplit remove` or `nsplit start` does (it is switched off again when
+  the last profile is removed).
+- If the host's `tailscaled` is stopped, systemd removes `/run/tailscale`; the repair then first creates it empty (root, mode 755) so there is a mountpoint to attach to.
+- Only the three services above are covered, and only these two mounts. The repair
+  changes no DNS or Tailscale setting and no authentication.
+- If a repair cannot be completed it is reported as `FAILED`, the service keeps
+  running, `nsplit status` keeps showing the profile as not ready, and
+  `nsplit-mounts.service` exits with status 2 (systemd reports that as a failed unit).
+
 ## Remove a profile, not its user
 
 With the account fully logged out:
@@ -162,11 +227,24 @@ sudo nsplit remove demo --dry-run
 sudo nsplit remove demo
 ```
 
-Known issues affect removal while they are open: the live firewall can keep the
-removed profile's rules until `sudo nsplit reload` ([#2](https://github.com/IsaacNudeton/nsplit-linux/issues/2)),
-and a key file you edited under `/etc/nsplit/ssh/PROFILE/` makes the first removal
-exit 1 ([#3](https://github.com/IsaacNudeton/nsplit-linux/issues/3)): keep a copy
-of the keys, delete that file and run the removal again.
+Removal regenerates the firewall without the removed profile, so its rules are gone
+from the live ruleset when `remove` finishes ([#2](https://github.com/IsaacNudeton/nsplit-linux/issues/2)).
+The firewall reads the profiles it forwards for from `/etc/nsplit/firewall-profiles`,
+which nsplit regenerates together with the UID guard. If that file is damaged (an entry
+that is not a profile name, a repeated name, a name without a readable record, an empty
+list while records exist), `nsplit-fw` exits without loading anything and says so. At boot
+that means no profile daemon starts until the list is repaired; to recover, repair the
+file or delete it so that every profile record is used, then run `sudo nsplit reload`.
+An installation from before this change has no list and keeps working from the profile
+records until its next `add` or `remove` writes one.
+
+A root-managed key file for the namespace OpenSSH server
+(`/etc/nsplit/ssh/PROFILE/authorized_keys`) is the administrator's: nsplit does not create
+it, never deletes it, and reports it as kept; that is not an error
+([#3](https://github.com/IsaacNudeton/nsplit-linux/issues/3)). A profile enrolled by
+0.1.0-12 or -13 has such a file recorded as nsplit's own: if keys were added to it, removal
+keeps it; if it is still exactly what nsplit wrote (it holds no keys), removal deletes it
+with the rest.
 
 Removal takes away the managed profile configuration, not the local account or
 home directory. Files changed outside nsplit are kept and reported rather than

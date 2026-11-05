@@ -1,0 +1,15 @@
+[Unit]
+Description=nsplit: watch the host paths whose replacement detaches a profile's mounts (/etc/resolv.conf, /run/tailscale)
+Documentation=https://github.com/IsaacNudeton/nsplit-linux/issues/1
+
+[Path]
+# NetworkManager (or anything else) replacing /etc/resolv.conf by rename; the host's tailscaled being stopped, started or restarted (its /run/tailscale is removed and re-created).
+# An unrelated file next to either path does not fire this unit (measured on the guest).
+PathChanged=/etc/resolv.conf
+PathChanged=/run/tailscale
+# No trigger limit: hitting the default one puts THIS unit in the failed state, and a failed path unit watches nothing (measured on the guest). A burst is coalesced by the service.
+TriggerLimitIntervalSec=0
+Unit=nsplit-mounts.service
+
+[Install]
+WantedBy=multi-user.target

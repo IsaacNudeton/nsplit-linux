@@ -3,7 +3,7 @@ PREFIX ?= /usr
 DESTDIR ?=
 LIBDIR = $(PREFIX)/lib/nsplit
 VERSION = $(shell sed -n 's/^NSPLIT_VERSION=//p' lib/nsplit/common.sh)
-HELPERS = nsplit-netns nsplit-fw nsplit-ufw nsplit-pam-gate nsplit-run nsplit-scoped nsplit-sockdir
+HELPERS = nsplit-netns nsplit-fw nsplit-ufw nsplit-pam-gate nsplit-run nsplit-scoped nsplit-sockdir nsplit-mounts
 
 .PHONY: all check install dist
 all: check
@@ -19,7 +19,7 @@ install:
 	install -m 755 $(addprefix lib/nsplit/,$(HELPERS)) $(DESTDIR)$(LIBDIR)/
 	install -m 644 lib/nsplit/*.sh $(DESTDIR)$(LIBDIR)/
 	install -m 644 share/nsplit/* $(DESTDIR)$(PREFIX)/share/nsplit/
-	for u in lib/systemd/system/*.service; do sed 's|@LIBDIR@|$(LIBDIR)|g' $$u > $(DESTDIR)$(PREFIX)/lib/systemd/system/$$(basename $$u); chmod 644 $(DESTDIR)$(PREFIX)/lib/systemd/system/$$(basename $$u); done
+	for u in lib/systemd/system/*.service lib/systemd/system/*.path lib/systemd/system/*.timer; do sed 's|@LIBDIR@|$(LIBDIR)|g' $$u > $(DESTDIR)$(PREFIX)/lib/systemd/system/$$(basename $$u); chmod 644 $(DESTDIR)$(PREFIX)/lib/systemd/system/$$(basename $$u); done
 	install -m 755 lib/NetworkManager/dispatcher.d/90-nsplit-uplink $(DESTDIR)$(PREFIX)/lib/NetworkManager/dispatcher.d/90-nsplit-uplink
 
 dist: check

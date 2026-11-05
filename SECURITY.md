@@ -22,15 +22,23 @@ tested in a guest. The host's own SSH server is unchanged and is not a way into 
 profile; the namespace OpenSSH server also listens on the profile's private link to
 the host, not only on its tailnet. See [validation](docs/VALIDATION.md).
 
-**A running profile service can lose its view of the profile.** The profile
-services and user manager get the profile's resolver file and Tailscale socket
-directory through bind mounts. If the host replaces `/etc/resolv.conf` or
-recreates `/run/tailscale` afterwards, the running service silently sees the host's
-versions instead. `nsplit status` does not detect this
-([issue #1](https://github.com/IsaacNudeton/nsplit-linux/issues/1), open). Until it
-is fixed, treat a profile's DNS and control-socket separation as unverified after a
-boot or a host DNS or Tailscale restart unless you checked the mounts yourself
-(see [validation](docs/VALIDATION.md#known-issues)).
+**A running profile service can lose its view of the profile, for a short time.** The profile
+services and user manager get the profile's resolver file and Tailscale socket directory
+through bind mounts. If the host replaces `/etc/resolv.conf` or recreates `/run/tailscale`
+afterwards (NetworkManager rewrites the file; the host's `tailscaled` is stopped, started or
+restarted), the running service silently sees the host's versions instead. While that
+lasts, a profile process's default Tailscale control path `/run/tailscale/tailscaled.sock`
+resolves to the **host** daemon's socket instead of the profile's, and names are looked up
+through the host's resolver file. Which operations the profile's user could then perform
+against the host daemon is decided by Tailscale's own operator and peer-credential checks and
+was not measured; the isolation the profile is meant to give is broken either way.
+`nsplit status` now reads the running services' mount tables (a lost mount is Degraded), and
+nsplit re-attaches the mounts without restarting or logging out anything, normally within a
+couple of seconds of the event; a safety timer checks every 15 minutes in case an event was
+missed ([issue #1](https://github.com/IsaacNudeton/nsplit-linux/issues/1)). This **shortens**
+the exposure; it does not remove it. A design in which a detached mount exposes an empty or
+inaccessible path instead of the host's socket is not implemented. See the usage notes on
+[lost profile mounts](docs/USAGE.md#lost-profile-mounts).
 
 **Socket protection has prerequisites.** Keep `fs.protected_hardlinks=1` enabled.
 Nsplit checks it before listener setup and at operation boundaries; it does not

@@ -7,6 +7,7 @@ usage: nsplit status [-v] [PROFILE]
   -v   also list every individual check (PASS / FAIL / UNKNOWN)
   Exit status: 0 if every profile shown is Ready; 2 if a profile it could check is not Ready; 3 if everything it could check is Ready but some profile could not be checked (Not checked).
   Some checks need root, and a profile's Tailscale daemon is reachable only by its owner and administrators: what a check cannot read is shown as UNKNOWN or Not checked, never as fine and never as broken.
+  The mount tables of the running services (daemon, namespace sshd, user manager) are read too: a lost private /etc/resolv.conf or /run/tailscale, or a running service whose unit no longer declares it, is Degraded; one that cannot be read (needs root) is Not checked.
   Current DNS resolution is checked inside the profile's namespace when run as root. Without those rights, configured DNS is shown separately from unverified current resolution; status never invokes the mutating login helper.
 EOF2
 }
@@ -106,7 +107,7 @@ except (ValueError,TypeError,KeyError,RecursionError) as error:
 
 # profile_status NAME -> S_STATE, S_DETAIL, S_CHECKS (lines "PASS|FAIL|UNKNOWN|INFO text")
 profile_status() {
-	local n=$1 st_ns st_ts st_fw st_dns be js suffix ips host mgr mgr_ns want dns dns_rc pf sd sdo sdrc secfail="" noperm="" unverified=""
+	local n=$1 st_ns st_ts st_fw st_dns be js suffix ips host mgr mgr_ns want dns dns_rc pf sd sdo sdrc secfail="" noperm="" unverified="" mrows mrc mmatch=0 mst munit mdest mmn mwhy
 	S_CHECKS=(); S_STATE=""; S_DETAIL=""
 	profile_load "$n" || { S_STATE=Degraded; S_DETAIL="profile file unreadable"; return 1; }
 	chk() { S_CHECKS+=("$1 $2"); }
@@ -190,6 +191,23 @@ profile_status() {
 		if [ -n "$want" ] && [ "$(ns_obj "/proc/$mgr/ns/net")" = "$want" ]; then chk PASS "$P_LOGIN's running user manager is inside $P_NS"; MGR=placed
 		else chk WARN "$P_LOGIN's running user manager is NOT inside $P_NS (log out and back in)"; MGR=unplaced; fi
 	else chk UNKNOWN "whether $P_LOGIN's running user manager is placed (needs root)"; MGR=unknown; fi
+	# the mounts of the RUNNING consumers (the profile's daemon, its namespace sshd, the user manager). A lost bind is invisible to a fresh probe process, which always gets correct ones, so the
+	# running processes' own mount tables are read. A missing mount is a failure; a view that could not be read (it needs root) is UNKNOWN and keeps the profile from being Ready.
+	if [ -x "$LIB/nsplit-mounts" ]; then
+		mrows=$("$LIB/nsplit-mounts" check --machine "$n" 2>/dev/null); mrc=$?
+		case $mrc in 0|2|3) ;; *) mrows=""; chk UNKNOWN "profile mounts: the check could not run (try: nsplit mounts check)"; unverified=1;; esac
+		while IFS=$'\t' read -r mst _ munit mdest mmn mwhy; do
+			case $mst in
+			MATCH) mmatch=$((mmatch+1));;
+			MISMATCH) chk FAIL "profile mounts: $munit has lost its private $mdest ($mwhy)"
+				[ -n "$secfail" ] || secfail="a running service of this profile lost its private $mdest ($munit); an administrator can re-attach it without restarting anything: sudo nsplit mounts repair $n";;
+			NOT-DECLARED) chk FAIL "profile mounts: $munit is running but its definition no longer declares the private $mdest ($mwhy)"
+				[ -n "$secfail" ] || secfail="a running service of this profile ($munit) no longer declares its private $mdest bind: its unit definition was changed; an administrator must restore it (nsplit will not attach a bind its unit does not declare)";;
+			UNKNOWN) chk UNKNOWN "profile mounts: $munit $mdest ($mwhy)"; unverified=1;;
+			esac
+		done <<<"$mrows"
+		[ "$mmatch" -eq 0 ] || chk PASS "profile mounts: $mmatch required view(s) of /etc/resolv.conf and /run/tailscale in the running services match their sources"
+	fi
 	# the headline
 	if [ "$st_ns" != active ] || [ "$st_ts" != active ] || [ "$st_fw" != active ]; then S_STATE=Stopped; S_DETAIL="start it with: nsplit start $n"
 	elif [ -n "$secfail" ]; then S_STATE=Degraded; S_DETAIL=$secfail   # an exposed daemon, or a uid the guard does not cover, is not hidden behind "Needs sign-in" (before sign-in the socket even carries the sign-in link)

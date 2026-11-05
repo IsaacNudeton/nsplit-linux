@@ -1,0 +1,13 @@
+[Unit]
+Description=nsplit: re-attach the profile mounts (resolv.conf, /run/tailscale) that a host path replacement detached from running services
+Documentation=https://github.com/IsaacNudeton/nsplit-linux/issues/1
+# Started by nsplit-mounts.path (a host path was replaced), by nsplit-mounts.timer (safety net) and by `nsplit start`. Requests that arrive while it runs are one run, never a queue.
+# No start limit: a limit hit here would make systemd drop later requests, and the path unit that started us would then stop watching (measured on the guest).
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+# repair only what a check found missing, with `systemctl bind` into the RUNNING units: nothing is restarted, signalled or logged out. Exit 2 (a mount is still missing / a repair failed) makes the unit
+# failed and shows in `nsplit status`. Exit 3 (something could not be read right now, e.g. a unit that is starting) is not a failure of this unit; the next run looks again.
+ExecStart=@LIBDIR@/nsplit-mounts repair --auto
+SuccessExitStatus=3
