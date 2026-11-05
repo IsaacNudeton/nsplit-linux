@@ -7,6 +7,7 @@ NSPLIT_VERSION=0.1.0
 ETC=${NSPLIT_ETC:-/etc/nsplit}
 PROFDIR=$ETC/profiles
 CONF=$ETC/nsplit.conf
+FWSET=$ETC/firewall-profiles   # the profiles the host firewall covers, one name per line: nsplit-fw up reads it (regenerated with the uid guard)
 VAR=${NSPLIT_VAR:-/var/lib/nsplit}
 OWNDIR=$VAR/owned          # one list per owner: "sha256  path" for every file nsplit created (removal deletes only unmodified files from here)
 BKDIR=$VAR/backup          # first-time backups of files nsplit edits in place
@@ -104,6 +105,8 @@ put_restore() { cat "$3" > "$2" && own_record "$1" "$2"; rm -f "$3"; }
 conf_get() { [ -r "$CONF" ] || return 1; ( . "$CONF" 2>/dev/null; eval "printf %s \"\${$1-}\"" ); }
 # SKIP_PROFILE (internal): a profile being removed, left out while the shared firewall/guard are regenerated without it
 profile_names() { local f n; for f in "$PROFDIR"/*.env; do [ -e "$f" ] || continue; n=$(basename "${f%.env}"); [ "$n" = "${SKIP_PROFILE:-}" ] || printf '%s\n' "$n"; done; return 0; }
+# fw_set_text NAME...: the content of $FWSET for exactly those profiles (sorted, once each; nothing for none)
+fw_set_text() { [ $# -eq 0 ] || printf '%s\n' "$@" | sort -u; }
 profile_exists() { [ -r "$PROFDIR/$1.env" ]; }
 # profile_load NAME: read the profile into P_* variables
 profile_load() {

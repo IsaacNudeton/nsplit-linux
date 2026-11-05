@@ -211,10 +211,11 @@ refresh_shared() { # regenerate what is shared between profiles from the profile
 	local uids n; uids=$(for n in $(profile_names); do ( . "$PROFDIR/$n.env"; echo "$UIDN" ); done | sort -nu | tr '\n' ' ')
 	OWNER=_shared
 	if [ -z "$uids" ]; then   # the last profile is gone: nothing is left to protect or forward for (nsplit.conf is removed by the caller once the profile record is gone, see remove)
-		local rc=0; rm -f "$ETC/uid-guard.nft"; own_forget _shared "$ETC/uid-guard.nft"; guard_refresh || rc=1; fw_refresh || rc=1
+		local rc=0; rm -f "$ETC/uid-guard.nft" "$FWSET"; own_forget _shared "$ETC/uid-guard.nft"; own_forget _shared "$FWSET"; guard_refresh || rc=1; fw_refresh || rc=1
 		return $rc; fi
+	# the firewall reads its profiles from $FWSET, not from the profile records, so a profile being removed (SKIP_PROFILE) is out of the ruleset the reload loads
 	# shellcheck disable=SC2086
-	put "$ETC/uid-guard.nft" 644 < <(guard_text $uids) && guard_refresh && fw_refresh; }
+	put "$ETC/uid-guard.nft" 644 < <(guard_text $uids) && put "$FWSET" 644 < <(fw_set_text $(profile_names)) && guard_refresh && fw_refresh; }
 pam_remove_for() { local gone=$1; shift; pam_install "$@"; }
 
 usage_uplinks() { cat <<'EOF2'
