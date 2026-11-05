@@ -241,6 +241,8 @@ step_files() {
 	OWNER=$NAME
 	put "$PROFDIR/$NAME.env" 644 < <(env_text)
 	put "$NETNSETC/$NS/resolv.conf" 644 < <(resolv_public_text)
+	# the firewall's list of profiles gets the new one before the firewall is started or reloaded (the profile being added is in the list once, whether or not its file exists yet: a preview)
+	OWNER=_shared; put "$FWSET" 644 < <(fw_set_text $(profile_names) "$NAME")
 }
 fw_refresh_after_env_removed() { fw_refresh; guard_refresh; }
 
