@@ -38,6 +38,7 @@ DRY=0
 UNDO=()
 OWNER=_shared
 APPLYING=0                 # 1 while `nsplit add` is applying changes: a failure or an interrupt then undoes them (nsplit_atexit)
+INTR_SIG=""                # the exit status (128 + signal) of a HUP, INT or TERM that arrived while `nsplit add` was applying: acted on at the next safe point (intr_check)
 NSPLIT_MAINPID=$$          # the main shell; a subshell that registers a temporary file cleans up its own
 
 # ---------------------------------------------------------------- output
@@ -96,6 +97,11 @@ tmp_rm() { # tmp_rm INDEX: remove that registered file if it is still the one re
 }
 tmp_drop() { local i; for i in "${!TMPREG_PATH[@]}"; do [ "${TMPREG_PATH[$i]}" = "$1" ] && tmp_rm "$i"; done; return 0; }
 tmp_sweep() { local i; for i in "${!TMPREG_PATH[@]}"; do [ "${TMPREG_PID[$i]}" = "$BASHPID" ] && tmp_rm "$i"; done; return 0; }
+# nsplit_signal N: what HUP, INT and TERM do (bin/nsplit installs it; N is 128 plus the signal number). While `nsplit add` is applying changes the FIRST signal is only noted: the step in progress finishes with its
+# undo registered, and the command then ends at the next safe point (intr_check) and undoes everything, so an interrupt never lands between a change and the registration of its undo. A second signal, or any signal
+# outside an apply, ends the command at once (an apply is still undone from what is registered by then).
+nsplit_signal() { if [ "${APPLYING:-0}" = 1 ] && [ -z "${INTR_SIG:-}" ]; then INTR_SIG=$1; warn "interrupted: finishing the step in progress, then undoing what this command did (send the signal again to stop at once)"; else exit "$1"; fi; }
+intr_check() { [ -z "${INTR_SIG:-}" ] || exit "$INTR_SIG"; }
 # nsplit_atexit: the one EXIT handler of the command (bin/nsplit installs it, with traps that turn HUP, INT and TERM into a failing exit: a signal alone leaves $? at 0 in an EXIT trap,
 # which used to skip the undo). The undo of an interrupted `add` comes first because it still needs the backup files; a second signal must not cut the undo or the cleanup short.
 nsplit_atexit() {
@@ -138,10 +144,11 @@ put() {
 	fi
 	if [ "$DRY" = 1 ]; then printf '    would %s: %s (mode %s)\n' "$([ $had = 1 ] && echo update || echo create)" "$path" "$mode"; tmp_drop "$new"; return 0; fi
 	mkdir -p "$(dirname "$path")"
-	if [ $had = 1 ]; then tmp_new prev; cp -p "$path" "$prev"; fi   # the rollback copy: dropped by put_restore, or swept at exit when nothing needed to be undone
+	# the undo is registered BEFORE the file is touched (restoring a file that was not changed, or removing one that was not made, does nothing), so no failure or interrupt can leave a change without its undo
+	if [ $had = 1 ]; then tmp_new prev; cp -p "$path" "$prev"; undo_push put_restore "$OWNER" "$path" "$prev"   # the rollback copy: dropped by put_restore, or swept at exit when nothing needed to be undone
+	else undo_push put_remove "$OWNER" "$path"; fi
 	install -m "$mode" "$new" "$path.nsplit-new" && { tmp_adopt "$path.nsplit-new"; mv -f "$path.nsplit-new" "$path"; }; tmp_drop "$new"
 	own_record "$OWNER" "$path"
-	if [ $had = 1 ]; then undo_push put_restore "$OWNER" "$path" "$prev"; else undo_push put_remove "$OWNER" "$path"; fi
 }
 # rmdir_ours DIR: remove DIR when it is empty, except a directory that belongs to another package and exists without nsplit (sudo's)
 rmdir_ours() { [ "$1" = "$SUDOERSDIR" ] || rmdir --ignore-fail-on-non-empty "$1" 2>/dev/null; return 0; }

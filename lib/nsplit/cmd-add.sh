@@ -248,8 +248,8 @@ pam_edit_login() {
 	if [ ! -e "$BKDIR/pam/login.orig" ]; then   # first edit ever: keep the original; if this run fails the backup goes away with the rest
 		undo_push put_remove _shared "$BKDIR/pam/login.orig"; mkdir -p "$BKDIR/pam"; cp -p "$PAMDIR/login" "$BKDIR/pam/login.orig"; fi
 	tmp_new prev; cp -p "$PAMDIR/login" "$prev"   # the rollback copy: dropped by pam_login_restore, or swept at exit when nothing needed to be undone
+	undo_push pam_login_restore "$prev"           # registered before the edit: restoring an unchanged file does nothing
 	install -m 644 "$new" "$PAMDIR/login.nsplit-new" && { tmp_adopt "$PAMDIR/login.nsplit-new"; mv -f "$PAMDIR/login.nsplit-new" "$PAMDIR/login"; }
-	undo_push pam_login_restore "$prev"
 }
 pam_login_restore() { cat "$1" > "$PAMDIR/login"; tmp_drop "$1"; }
 
@@ -265,7 +265,8 @@ guard_refresh() { # load the guard file as it is now (atomic reload), or remove 
 
 step_files() {
 	say "  - profile configuration"
-	[ "$DRY" = 1 ] || undo_push fw_refresh_after_env_removed   # pushed first = runs last: after the profile files are gone
+	[ "$DRY" = 1 ] || undo_push rmdir_conf_dirs   # pushed first of all = runs last: the configuration directories this run made, once they are empty
+	[ "$DRY" = 1 ] || undo_push fw_refresh_after_env_removed   # runs after the profile files are gone
 	OWNER=_shared; [ -r "$CONF" ] || { put "$CONF" 644 < <(conf_text); }
 	OWNER=$NAME
 	put "$PROFDIR/$NAME.env" 644 < <(env_text)
@@ -274,6 +275,7 @@ step_files() {
 	OWNER=_shared; put "$FWSET" 644 < <(fw_set_text $(profile_names) "$NAME")
 }
 fw_refresh_after_env_removed() { fw_refresh; guard_refresh; }
+rmdir_conf_dirs() { rmdir "$ETC/ssh" "$ETC/dns" "$PROFDIR" 2>/dev/null; rmdir "$ETC" 2>/dev/null; true; }   # the same directories `nsplit remove` takes away when it is the last profile; rmdir only ever removes an empty one
 
 step_guard() {
 	say "  - host-namespace egress guard for uid $UIDN"
@@ -312,7 +314,7 @@ step_start() {
 	[ "$DRY" = 1 ] || undo_push $SYSTEMCTL disable --now "nsplit-tailscaled@$NAME.service"
 	run $SYSTEMCTL enable --now "nsplit-tailscaled@$NAME.service" || die "the Tailscale daemon for $NAME did not start (see: journalctl -u nsplit-tailscaled@$NAME)"
 	[ "$DRY" = 1 ] && return 0
-	local i; for i in $(seq 30); do [ -S "$(sock_of "$NAME")" ] && break; sleep 1; done
+	local i; for i in $(seq 30); do [ -S "$(sock_of "$NAME")" ] && break; intr_check; sleep 1; done
 	[ -S "$(sock_of "$NAME")" ] || die "the profile's Tailscale daemon did not come up (see: journalctl -u nsplit-tailscaled@$NAME)"
 }
 
@@ -330,8 +332,8 @@ step_ssh() {
 		undo_push put_remove "$NAME" "$d/ssh_host_ed25519_key"; undo_push put_remove "$NAME" "$d/ssh_host_ed25519_key.pub"
 	fi
 	/usr/bin/sshd -t -f "$d/sshd_config" || die "the generated sshd configuration does not parse"
+	undo_push $SYSTEMCTL disable --now "nsplit-sshd@$NAME.service"   # before the enable: `enable --now` can enable the unit and then fail to start it
 	$SYSTEMCTL enable --now "nsplit-sshd@$NAME.service" || die "the namespace sshd did not start"
-	undo_push $SYSTEMCTL disable --now "nsplit-sshd@$NAME.service"
 }
 
 step_placement() {
@@ -378,9 +380,9 @@ except OSError as e: sys.exit(0 if e.errno==errno.ECONNREFUSED else 1)'
 as_user() { local u=$1 g; shift; g=$(id -g "$u"); setpriv --reuid="$UIDN" --regid="$g" --clear-groups "$@"; }
 add_checks() {
 	local fails=0 pass=0 o
-	okc() { pass=$((pass+1)); printf '    PASS  %s\n' "$*"; }
-	badc() { fails=$((fails+1)); printf '    FAIL  %s\n' "$*"; }
-	skipc() { printf '    SKIP  %s\n' "$*"; }
+	okc() { intr_check; pass=$((pass+1)); printf '    PASS  %s\n' "$*"; }
+	badc() { intr_check; fails=$((fails+1)); printf '    FAIL  %s\n' "$*"; }
+	skipc() { intr_check; printf '    SKIP  %s\n' "$*"; }
 	say "  checking:"
 	# the guard: exactly the expected uids and rules
 	o=$($NFT list table inet nsplit_uid 2>/dev/null)
@@ -425,7 +427,8 @@ add_checks() {
 
 # ---- the command ---------------------------------------------------------------------------------------------------------
 apply_all() {
-	step_files; step_guard; step_dbus; step_start; step_ssh; step_operator; step_scoped; step_placement; step_gate
+	# an interrupt that arrives during a step is acted on here, between steps, when every change so far has its undo registered
+	step_files; intr_check; step_guard; intr_check; step_dbus; intr_check; step_start; intr_check; step_ssh; intr_check; step_operator; intr_check; step_scoped; intr_check; step_placement; intr_check; step_gate; intr_check
 }
 
 cmd_add() {

@@ -12,8 +12,8 @@ for f in cmd-dns cmd-add cmd-login cmd-status cmd-ops cmd-mounts; do
 	# shellcheck disable=SC1090
 	. "$LIB/$f.sh"
 done
-# one EXIT handler for every command (undo of an interrupted add, then the temporary files); a signal becomes a failing exit so that handler sees it
-trap nsplit_atexit EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+# one EXIT handler for every command (undo of an interrupted add, then the temporary files); a signal becomes a failing exit so that handler sees it (nsplit_signal: an add that is applying finishes its current step first)
+trap nsplit_atexit EXIT; trap 'nsplit_signal 129' HUP; trap 'nsplit_signal 130' INT; trap 'nsplit_signal 143' TERM
 
 usage() { cat <<'EOT'
 nsplit: your profile, your network.
