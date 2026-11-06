@@ -59,6 +59,9 @@ node_summary() { local js h ip su; js=$(ts "$1" status --json 2>/dev/null)
 # node_operator NAME: the operator the node really has right now (empty = root only); fails when it cannot be read
 node_operator() { local o; o=$(ts "$1" debug prefs 2>/dev/null) || return 1; [ "$(pyj '"ok"' <<<"$o")" = ok ] || return 1; pyj 'd.get("OperatorUser","")' <<<"$o"; }
 
+# node_ssh NAME: "on" or "off": whether the node's built-in Tailscale SSH server is enabled right now (RunSSH in its preferences); fails when that cannot be read. Never "off" for a value that is not there.
+node_ssh() { local o v; o=$(ts "$1" debug prefs 2>/dev/null) || return 1; v=$(pyj 'd.get("RunSSH")' <<<"$o"); case $v in True) printf on;; False) printf off;; *) return 1;; esac; }
+
 # login_socket_check NAME: a fresh read-only check, including the kernel hard-link prerequisite and visible socket link count. Never changes permissions or machine policy.
 login_socket_check() {
 	local n=$1 out rc
@@ -137,6 +140,7 @@ cmd_login() {
 	local cmd=("$TS_BIN" --socket="$sock" up --hostname="$P_TS_HOSTNAME" --accept-dns=false --ssh="$ssh_flag" --operator="$op")
 	say "profile : $pn   node: $P_TS_HOSTNAME   (daemon verified inside $P_NS)"
 	say "command : ${cmd[*]}"
+	[ "$P_SSH" != tailscale ] || say "NOTICE   : this profile is enrolled with --ssh tailscale: the SSH rules of the tailnet policy $P_LOGIN controls choose the local account a login becomes (any account on this machine, root included); nsplit cannot limit them and its login gate does not cover these sessions."
 	[ "$dry" = 1 ] && { say "(dry run: not executed)"; return 0; }
 	say "Open the link printed below in a browser and sign in with $P_LOGIN's own Tailscale account."
 	"${cmd[@]}" || die "sign-in did not complete (run it again; nothing else was changed)"

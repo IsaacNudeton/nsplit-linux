@@ -8,6 +8,8 @@ usage: nsplit status [-v] [PROFILE]
   Exit status: 0 if every profile shown is Ready; 2 if a profile it could check is not Ready; 3 if everything it could check is Ready but some profile could not be checked (Not checked).
   Some checks need root, and a profile's Tailscale daemon is reachable only by its owner and administrators: what a check cannot read is shown as UNKNOWN or Not checked, never as fine and never as broken.
   The mount tables of the running services (daemon, namespace sshd, user manager) are read too: a lost private /etc/resolv.conf or /run/tailscale, or a running service whose unit no longer declares it, is Degraded; one that cannot be read (needs root) is Not checked.
+  The node's real built-in Tailscale SSH setting is read and compared with what the profile record says: ON although the record says none or openssh is a security problem (Degraded: the tailnet
+  policy can then authorize logins as other local accounts or root, which nsplit's login gate does not cover); a profile enrolled with --ssh tailscale always carries that boundary as a warning.
   Current DNS resolution is checked inside the profile's namespace when run as root. Without those rights, configured DNS is shown separately from unverified current resolution; status never invokes the mutating login helper.
 EOF2
 }
@@ -107,7 +109,7 @@ except (ValueError,TypeError,KeyError,RecursionError) as error:
 
 # profile_status NAME -> S_STATE, S_DETAIL, S_CHECKS (lines "PASS|FAIL|UNKNOWN|INFO text")
 profile_status() {
-	local n=$1 st_ns st_ts st_fw st_dns be js suffix ips host mgr mgr_ns want dns dns_rc pf sd sdo sdrc secfail="" noperm="" unverified="" mrows mrc mmatch=0 mst munit mdest mmn mwhy
+	local n=$1 ssh_now st_ns st_ts st_fw st_dns be js suffix ips host mgr mgr_ns want dns dns_rc pf sd sdo sdrc secfail="" noperm="" unverified="" mrows mrc mmatch=0 mst munit mdest mmn mwhy
 	S_CHECKS=(); S_STATE=""; S_DETAIL=""
 	profile_load "$n" || { S_STATE=Degraded; S_DETAIL="profile file unreadable"; return 1; }
 	chk() { S_CHECKS+=("$1 $2"); }
@@ -164,6 +166,17 @@ profile_status() {
 	root) chk INFO "root-managed: only an administrator signs this node in (sudo nsplit login $n)";;
 	*) chk WARN "the profile record does not say who manages it: treated as root-managed (only an administrator signs it in)";;
 	esac
+	# built-in Tailscale SSH: the node's real setting against the profile record (the record only says what nsplit set when it signed the node in; the node's operator can change it afterwards)
+	if [ -n "$be" ]; then
+		ssh_now=$(node_ssh "$n") || ssh_now=""
+		case "${P_SSH:-none}:$ssh_now" in
+		tailscale:on) chk WARN "Tailscale SSH is ON, as enrolled (--ssh tailscale): the SSH rules of this node's tailnet policy choose the local account, which can be any account on this machine including the administrator and root; nsplit can neither read nor limit that policy and its login gate does not cover these sessions";;
+		tailscale:off) if [ "$be" = Running ]; then chk WARN "Tailscale SSH is OFF although the profile record says --ssh tailscale (the node's setting was changed after sign-in)"; else chk INFO "Tailscale SSH is not on yet (nsplit login switches it on with the sign-in)"; fi;;
+		*:off) chk PASS "built-in Tailscale SSH is off, as the profile record says (--ssh ${P_SSH:-none})";;
+		*:on) secfail="built-in Tailscale SSH is ON for this node although the profile record says --ssh ${P_SSH:-none}: its tailnet policy can authorize logins as other local accounts or root, which nsplit's login gate does not cover. An administrator can switch it off: sudo nsplit ts $n set --ssh=false"; chk FAIL "$secfail";;
+		*) chk UNKNOWN "whether built-in Tailscale SSH is on (the node's preferences could not be read)"; unverified=1;;
+		esac
+	fi
 	pf=$SDIR/user@$P_UIDN.service.d/50-nsplit.conf
 	[ -f "$pf" ] && grep -q "NetworkNamespacePath=/run/netns/$P_NS" "$pf" && chk PASS "placement drop-in for user@$P_UIDN.service is installed" || chk FAIL "placement drop-in is missing or wrong ($pf)"
 	if grep -q "nsplit-pam-gate $P_LOGIN $P_UIDN $P_NS" "$PAMDIR/plasmalogin" 2>/dev/null && grep -q "nsplit-pam-gate $P_LOGIN $P_UIDN $P_NS" "$PAMDIR/login" 2>/dev/null && [ -x "$GATE" ]; then chk PASS "login gate present in the graphical and console login"
@@ -219,7 +232,8 @@ profile_status() {
 	elif printf '%s\n' "${S_CHECKS[@]}" | grep -q '^FAIL'; then S_STATE=Degraded; S_DETAIL="$(printf '%s\n' "${S_CHECKS[@]}" | grep -m1 '^FAIL' | cut -d' ' -f2-)"
 	elif [ "$MGR" = unplaced ]; then S_STATE="Needs new login"; S_DETAIL="placement applies at the next login: $P_LOGIN should log out and back in"
 	elif [ -n "$unverified" ]; then S_STATE="Not checked"; S_DETAIL="something that keeps it safe could not be read: $(printf '%s\n' "${S_CHECKS[@]}" | grep -m1 '^UNKNOWN' | cut -d' ' -f2-) (nsplit status -v $n)"
-	else S_STATE=Ready; S_DETAIL="personal tailnet connected (${host:-?}, ${ips:-no address yet})"; [ "$MGR" = unknown ] && S_DETAIL+="; running session not checked without root"; fi
+	else S_STATE=Ready; S_DETAIL="personal tailnet connected (${host:-?}, ${ips:-no address yet})"; [ "$MGR" = unknown ] && S_DETAIL+="; running session not checked without root"
+		[ "${P_SSH:-}" != tailscale ] || S_DETAIL+="; WARNING: Tailscale SSH is on and its tailnet policy, not nsplit, picks the local account (nsplit status -v $n)"; fi
 }
 
 cmd_status() {
