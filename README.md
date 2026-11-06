@@ -12,8 +12,9 @@ work is complete; this is not a claim of general Linux compatibility or a
 production deployment certification. Start in a disposable virtual machine.
 See [validation and limits](docs/VALIDATION.md).
 
-**0.2.0-alpha.1 adds an alpha feature, [headless profiles](docs/USAGE.md#headless-profiles---mode-headless-alpha)** (`nsplit add USER --mode headless`). It was tested in a disposable
-guest on a throwaway lab tailnet as scoped in [validation](docs/VALIDATION.md#headless-profiles-020-alpha1), and has had no independent review.
+**0.2.0-alpha.1 added an alpha feature, [headless profiles](docs/USAGE.md#headless-profiles---mode-headless-alpha)** (`nsplit add USER --mode headless`), and **0.2.0-alpha.2 adds a second, the optional
+[host-SSH denial](docs/USAGE.md#refusing-enrolled-users-at-the-hosts-own-sshd---host-ssh-deny-alpha)** (`--host-ssh deny`). Both were tested in a disposable guest on a throwaway lab tailnet as scoped in
+[validation](docs/VALIDATION.md#headless-profiles-020-alpha1), and have had no independent review.
 
 ## What it does
 
@@ -29,6 +30,7 @@ guest on a throwaway lab tailnet as scoped in [validation](docs/VALIDATION.md#he
   inside the profile's namespace, so the user's own services run in their private network across
   logouts and reboots, and the user is reached only through the profile's own OpenSSH server over
   their tailnet; no desktop or Plasma login manager is needed.
+- Optionally (`--host-ssh deny`, alpha) also refuses the profile's user at the host's own `sshd`, with a mandatory recovery account, so the profile's OpenSSH over their tailnet is the only way in.
 
 Ordinary internet traffic uses permitted physical uplinks. This is **not** an
 all-traffic Tailscale exit-node configuration, anonymity tool or complete
@@ -102,7 +104,7 @@ See [validation and limits](docs/VALIDATION.md) for exactly what was and was not
 
 ### Former known issues, fixed in this snapshot
 
-The focused test found three problems. Each is fixed in 0.1.0-14 (this snapshot is 0.2.0-alpha.1)
+The focused test found three problems. Each is fixed in 0.1.0-14 (this snapshot is 0.2.0-alpha.2)
 and its issue is closed. The fixes were tested off-host and in a disposable guest on the reviewed
 0.1.0-12 program files with the changed files copied over them. The 0.1.0-14 package built from
 this repository was later installed over 0.1.0-12 in a disposable guest for the Tailscale SSH test,

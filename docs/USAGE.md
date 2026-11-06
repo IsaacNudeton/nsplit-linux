@@ -28,14 +28,14 @@ do not weaken the check.
 ## Build the packaged snapshot
 
 This repository began as a single-commit snapshot of nsplit 0.1.0-13 and is now
-nsplit **0.2.0-alpha.1** (an alpha: see below). The reviewed runtime baseline, 0.1.0-12, is described in
+nsplit **0.2.0-alpha.2** (an alpha: see below). The reviewed runtime baseline, 0.1.0-12, is described in
 [VALIDATION.md](VALIDATION.md); the 0.1.0-13 package differed from it only by the added
 MIT license text, 0.1.0-14 adds the fixes for issues #1 to #3 (see
 [former known issues](VALIDATION.md#former-known-issues)), 0.1.0-15 the fixes for
 #7 and #8 (see [validation](VALIDATION.md#defects-7-and-8-fixed-in-010-15)), 0.1.0-16 the
 fixes for #9 and #10 (see [validation](VALIDATION.md#defect-10-fixed-in-010-16)), and 0.1.0-17 the
-fix for #17, the temporary files (see [validation](VALIDATION.md#issue-17-fixed-in-0110-17)). **0.2.0-alpha.1 adds headless profiles**, a new feature that has had no independent review (see
-[validation](VALIDATION.md#headless-profiles-020-alpha1)); pacman versions cannot contain a hyphen, so the package is called `0.2.0alpha.1` (it sorts after 0.1.0-17 and before 0.2.0).
+fix for #17, the temporary files (see [validation](VALIDATION.md#issue-17-fixed-in-0110-17)). **0.2.0-alpha.1 adds headless profiles** and **0.2.0-alpha.2 the optional host-SSH denial**, new features that have had no independent review (see
+[validation](VALIDATION.md#headless-profiles-020-alpha1) and [validation](VALIDATION.md#host-ssh-denial-020-alpha2)); pacman versions cannot contain a hyphen, so the package is called `0.2.0alpha.2` (it sorts after 0.2.0alpha.1 and 0.1.0-17 and before 0.2.0).
 The following creates a source checkout on a new evaluation machine. For an
 existing development checkout, use that checkout rather than creating duplicates.
 
@@ -44,7 +44,7 @@ git clone https://github.com/IsaacNudeton/nsplit-linux.git
 cd nsplit-linux
 make check
 make dist
-cp nsplit-0.2.0alpha.1.tar.gz packaging/arch/
+cp nsplit-0.2.0alpha.2.tar.gz packaging/arch/
 (cd packaging/arch && makepkg --syncdeps)
 ```
 
@@ -57,7 +57,7 @@ verification of an arbitrary downloaded archive.
 Install only the package you just built, in the evaluation VM:
 
 ```sh
-sudo pacman -U packaging/arch/nsplit-0.2.0alpha.1-1-any.pkg.tar.zst
+sudo pacman -U packaging/arch/nsplit-0.2.0alpha.2-1-any.pkg.tar.zst
 pacman -Q nsplit
 nsplit --version
 ```
@@ -179,6 +179,38 @@ What the mode does, and requires:
   to the profile's tailnet address if that matters; nothing in this release restricts it.
 - The host's own `sshd` is **unchanged**: an enrolled headless user can still log in there and gets a shell in the host's network namespace (the UID guard keeps it off the network). Refusing them there is a separate,
   optional policy that this release does not include.
+
+## Refusing enrolled users at the host's own sshd (`--host-ssh deny`, alpha)
+
+By default an enrolled user can still log in to this machine through the host's ordinary `sshd`, and a shell from there runs in the **host's** network namespace: the UID guard keeps it off the network
+beyond loopback, but it sees local files, loopback and unix sockets. For a headless profile you may want the user to come in only through their own profile's OpenSSH server over their tailnet. This
+**optional** policy (never the default) refuses the profile's user at the host's `sshd`. It is an alpha feature (0.2.0-alpha.2): read what was and was not tested in
+[validation](VALIDATION.md#host-ssh-denial-020-alpha2).
+
+```sh
+# keep an authenticated SSH session of the recovery account open in another terminal, then:
+sudo nsplit add alice --mode headless --host-ssh deny --recovery-user admin
+sudo nsplit host-ssh deny bob --recovery-user admin     # a profile that already exists
+sudo nsplit host-ssh allow bob                          # take it away again
+sudo nsplit host-ssh status                             # what is configured, and what sshd -T says now
+```
+
+- **What it writes:** one drop-in, `/etc/ssh/sshd_config.d/50-nsplit-host-ssh.conf`, with `DenyUsers` for every profile that has the policy (it is generated from the profiles' records, so it cannot disagree with
+  them), and only when the host's `sshd_config` includes that directory; otherwise nsplit refuses and says so. The main `sshd_config`, the host keys, PAM, the firewall, Tailscale and sshd's service definition are never
+  touched, a drop-in of that name that nsplit did not write (or that was changed since) is never overwritten or removed, and the directory itself is never removed.
+- **A recovery account is mandatory.** It is an existing account that is not enrolled in nsplit, not denied elsewhere, with a login shell and a home directory, not expired, and that the host's `sshd` lets in
+  **as configured now** (judged with `sshd -T`: an authorized key it accepts, or an allowed password; the host must not demand more than one authentication method). nsplit cannot prove that the account's
+  owner still holds the key, so **an authenticated SSH session of that account must be open while the policy is applied**: the command refuses unless one exists (`--no-session-check` overrides this, on your own
+  responsibility). One policy has one recovery account.
+- **Checked before anything takes effect:** the whole configuration with `sshd -t`, and the effective result for every denied user and for the recovery account with `sshd -T`. sshd is then **reloaded**, never
+  restarted, so open sessions stay. Any failure, and any interrupt, leaves the previous policy in force (an add is undone completely; `deny` and `allow` put the record, the drop-in and sshd's view back).
+- **Removing** a profile takes its user off the list; when no profile has the policy any more the drop-in is removed and sshd reloads.
+- **Status** (`nsplit status`, `nsplit host-ssh status`) shows whether the policy is configured, whether the drop-in is exactly what nsplit wrote, and what `sshd -T` says now. A setting that cannot be read is
+  `UNKNOWN` and is never reported as enforced; a drop-in that is missing or changed is a Degraded security finding. Reading `sshd -T` needs administrator rights.
+- **If you are locked out:** use the held recovery session, or the console, and run `sudo nsplit host-ssh allow PROFILE` (or `sudo nsplit remove PROFILE`). With nsplit gone from the picture, deleting
+  `/etc/ssh/sshd_config.d/50-nsplit-host-ssh.conf` and reloading sshd (`sudo systemctl reload sshd`) does the same.
+- **What it does not do:** it does not restrict any other way in (cron or `at` jobs, services running as the user, `su` or `sudo -u` from another account), it does not change the profile's own OpenSSH server
+  (which never carries `DenyUsers` and does not include the host's drop-in directory), and it does not decide who the recovery account's owner is.
 
 ## Sign in and verify
 

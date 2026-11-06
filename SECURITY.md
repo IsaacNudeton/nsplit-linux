@@ -34,6 +34,13 @@ remain available to it. (4) A user service that listens on all addresses is reac
 sshd is unchanged: a headless user can still log in there and gets a shell in the host namespace (UID guard as above); refusing that is a separate optional policy that this release does not include. (6) Lingering is a
 per-user logind setting for the whole machine: nsplit refuses to enrol a user who already has it, never touches lingering it did not switch on, and switches its own off only after checking that there is no login session.
 
+**Host SSH denial (`--host-ssh deny`, alpha).** The optional policy writes one `DenyUsers` drop-in for the host's own `sshd`; everything it can promise comes from `sshd -t` and `sshd -T` on the configuration
+as it is now: (1) it only works when the host's `sshd_config` already includes `sshd_config.d/*.conf`, and the main file is never edited; (2) a later configuration of the administrator can still let a user in
+(for instance another drop-in); `nsplit status` reads `sshd -T` and says Degraded when the user is not listed, `UNKNOWN` when it cannot read it, and never "enforced" on a guess; (3) the recovery account that keeps
+host SSH access is judged by what `sshd` would do with it, but nobody can prove that its owner still holds the key, which is why an authenticated session of it must be held open while the policy is applied;
+(4) it refuses one way in only: cron or `at` jobs, services running as the user, and `su` or `sudo -u` from another account are not covered; (5) sshd is reloaded, never restarted, and the previous policy stays in
+force when anything fails.
+
 **`--ssh tailscale` does not carry the protections of `--ssh openssh`** ([#9](https://github.com/IsaacNudeton/nsplit-linux/issues/9)).
 Which local account a Tailscale SSH session becomes is decided by the SSH policy of the
 tailnet the profile is signed in to, which is the profile user's own account: in the test,
