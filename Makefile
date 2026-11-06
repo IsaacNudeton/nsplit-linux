@@ -3,7 +3,7 @@ PREFIX ?= /usr
 DESTDIR ?=
 LIBDIR = $(PREFIX)/lib/nsplit
 VERSION = $(shell sed -n 's/^NSPLIT_VERSION=//p' lib/nsplit/common.sh)
-# pacman versions cannot contain a hyphen: 0.2.0-alpha.2 is packaged as 0.2.0alpha.2 (which sorts after 0.1.0 and before 0.2.0)
+# pacman versions cannot contain a hyphen: 0.2.0-alpha.3 is packaged as 0.2.0alpha.3 (which sorts after 0.1.0 and before 0.2.0)
 PKGVER = $(subst -,,$(VERSION))
 HELPERS = nsplit-netns nsplit-fw nsplit-ufw nsplit-pam-gate nsplit-run nsplit-scoped nsplit-sockdir nsplit-mounts
 

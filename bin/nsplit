@@ -8,7 +8,7 @@ ROOT=$(dirname "$(dirname "$SELF")")
 LIB=${NSPLIT_LIB:-$ROOT/lib/nsplit}; SHARE=${NSPLIT_SHARE:-$ROOT/share/nsplit}
 # shellcheck source=../lib/nsplit/common.sh
 . "$LIB/common.sh"
-for f in cmd-dns cmd-add cmd-login cmd-status cmd-ops cmd-mounts cmd-hostssh; do
+for f in cmd-dns cmd-add cmd-login cmd-status cmd-ops cmd-mounts cmd-hostssh cmd-setup; do
 	# shellcheck disable=SC1090
 	. "$LIB/$f.sh"
 done
@@ -19,6 +19,7 @@ usage() { cat <<'EOT'
 nsplit: your profile, your network.
 
   nsplit add USER        set up networking for an existing user: their own namespace and Tailscale node (preview with --dry-run)
+  nsplit setup           a frontend that sets several users up at once for a shared GPU machine (headless profiles): nsplit setup --preset shared-gpu USER...
   nsplit login [PROFILE] sign that profile's node in to the user's own Tailscale account (prints a link to approve)
   nsplit status [-v]     what is true now for every profile, and what needs attention
   nsplit start | stop    start or stop a profile's managed networking now (PROFILE or --all)
@@ -46,6 +47,7 @@ case $cmd in
 	reload) cmd_reload "$@";;
 	mounts) cmd_mounts "$@";;
 	host-ssh) cmd_hostssh "$@";;
+	setup) cmd_setup "$@";;
 	run) cmd_run "$@";;
 	ts) cmd_ts "$@";;
 	version|--version|-V) echo "nsplit $NSPLIT_VERSION";;
