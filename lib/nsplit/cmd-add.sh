@@ -15,6 +15,12 @@ usage: nsplit add USER [options]
   --dry-run            show every file and command that would change, change nothing
   --yes                do not ask for confirmation
   --name NAME          profile name (default: the username; up to 12 chars of a-z 0-9 _ -, starting with a letter)
+  --mode MODE          desktop (default) | headless
+                         desktop    the user logs in at this computer (graphical or console) and their desktop, terminals and services use the profile's network from their next login
+                         headless   no desktop is needed: the user's service manager stays running without a login (systemd lingering, switched on by nsplit last and off again by nsplit remove) inside
+                                    the profile's network, so their own `systemctl --user` services run there across logouts and reboots; the user is reached only through the profile's OpenSSH server over
+                                    their own tailnet. A headless profile is always --ssh openssh and root-managed (the user does not become the node's Tailscale operator and cannot switch the built-in
+                                    Tailscale SSH on), it needs no Plasma login manager, and the user must not already have lingering enabled. --mode=headless is accepted too.
   --ssh MODE           none (default) | openssh | tailscale
                          openssh    a separate OpenSSH server inside their namespace that accepts exactly this user (the recommended remote shell)
                          tailscale  ADVANCED: Tailscale's own built-in SSH server on their node. It needs --accept-tailscale-ssh-risk (see below).
@@ -36,6 +42,7 @@ add_derive() {
 	NAME=${NAME:-$LOGIN}; NAME_ARG=$NAME
 	UIDN=$(user_uid "$LOGIN")
 	NS=netns-$NAME; VH=vh-$NAME; VN=vn-$NAME; TS_IF=ts-$NAME
+	PAMSVC=nsplit-sshd-$NAME   # the PAM service of a headless profile's namespace OpenSSH server
 	if [ -r "$CONF" ]; then POOL=$(conf_get POOL); UPLINKS_USED=$(conf_get UPLINKS); PUBLIC_DNS=$(conf_get PUBLIC_DNS)
 	else POOL=$(pick_pool) || POOL=""; UPLINKS_USED=${UPLINKS_ARG:-$(discover_uplinks)}; PUBLIC_DNS=$DEFAULT_PUBLIC_DNS; fi
 	: "${PUBLIC_DNS:=$DEFAULT_PUBLIC_DNS}"
@@ -60,8 +67,19 @@ add_preflight() {
 	[ -x /usr/bin/dnsmasq ] || problem "dnsmasq is not installed (it is the profile's private resolver)"
 	[ "$SSH" != openssh ] || { [ -x /usr/bin/sshd ] && command -v ssh-keygen >/dev/null || problem "--ssh openssh needs OpenSSH (sshd, ssh-keygen)"; }
 	[ "$SSH" != tailscale ] || [ "$ACK_TS" = 1 ] || problem "--ssh tailscale needs --accept-tailscale-ssh-risk (--yes does not stand in for it): with Tailscale's built-in SSH server the SSH rules of $LOGIN's tailnet policy choose the local account a login becomes (any account on this machine, including the administrator and root), nsplit cannot read or limit them, and its login gate does not cover these sessions. The recommended remote shell is --ssh openssh."
+	if [ "$MODE" = headless ]; then
+		[ "$SSH" = openssh ] || problem "--mode headless goes with --ssh openssh only (the namespace OpenSSH server is how a headless profile is reached, and Tailscale's built-in SSH stays off): this enrolment is --ssh $SSH"
+		[ -r "$PAMDIR/sshd" ] || [ -r "$PAMVENDOR/sshd" ] || problem "--mode headless needs the host's PAM service for sshd ($PAMDIR/sshd): the namespace OpenSSH server's own PAM service includes it and then adds the placement gate"
+		case $(linger_state "$LOGIN") in
+		off) ;;
+		on) problem "$LOGIN already has lingering enabled (loginctl enable-linger): this release does not take over lingering it did not switch on. Disable it first (loginctl disable-linger $LOGIN), or enrol $LOGIN with --mode desktop";;
+		*) problem "could not tell whether $LOGIN has lingering enabled ($LINGERDIR is not readable)";;
+		esac
+		[ ! -e "$PAMDIR/$PAMSVC" ] || [ "$(own_sha "$NAME" "$PAMDIR/$PAMSVC")" = "$(sha "$PAMDIR/$PAMSVC")" ] || problem "$PAMDIR/$PAMSVC already exists and was not made by nsplit; not overwriting it"
+		[ ! -e "$LINGERMARK/$NAME" ] || problem "$LINGERMARK/$NAME exists: a record of lingering from an earlier profile of that name was never cleaned up"
+	fi
 	[ "$ACK_TS" != 1 ] || [ "$SSH" = tailscale ] || problem "--accept-tailscale-ssh-risk only goes with --ssh tailscale (this enrolment is --ssh $SSH)"
-	[ -r "$PAMVENDOR/plasmalogin" ] || problem "this system's graphical login is not the supported one (no $PAMVENDOR/plasmalogin: only the Plasma login manager is supported in this release)"
+	[ "$MODE" = headless ] || [ -r "$PAMVENDOR/plasmalogin" ] || problem "this system's graphical login is not the supported one (no $PAMVENDOR/plasmalogin: only the Plasma login manager is supported in this release; a profile that needs no desktop can use --mode headless)"
 	[ -r "$PAMDIR/login" ] || problem "no $PAMDIR/login (the console login stack)"
 	if [ -r "$PAMDIR/plasmalogin" ] && ! grep -q '# nsplit:' "$PAMDIR/plasmalogin" && ! cmp -s "$PAMDIR/plasmalogin" "$PAMVENDOR/plasmalogin"; then
 		[ "$(own_sha _shared "$PAMDIR/plasmalogin")" = "$(sha "$PAMDIR/plasmalogin")" ] || problem "$PAMDIR/plasmalogin already exists and was not made by nsplit; not overwriting it"
@@ -124,6 +142,7 @@ TS_PORT=$TS_PORT
 TS_HOSTNAME=$TS_HOSTNAME
 SSH=$SSH
 MANAGED=$MANAGED
+MODE=$MODE
 EOF
 }
 conf_text() { cat <<EOF
@@ -157,7 +176,8 @@ table inet nsplit_uid {
 }
 EOF
 }
-placement_text() { cat <<EOF
+placement_text() { if [ "$MODE" = headless ]; then placement_text_headless; else placement_text_desktop; fi; }
+placement_text_desktop() { cat <<EOF
 # nsplit profile $NAME: places $LOGIN's whole user manager (so the desktop, terminals and user services started from it) in $NS. Affects user@$UIDN.service only.
 # Requisite= (not Requires=/Wants=): if the namespace is not already up the manager FAILS to start instead of running unplaced; nothing is ever started by this file.
 [Unit]
@@ -170,6 +190,39 @@ InaccessiblePaths=-/run/systemd/resolve -/var/lib/tailscale
 BindPaths=/run/tailscale-$NAME:/run/tailscale
 EOF
 }
+# A headless profile's user manager is started by systemd-logind at boot (lingering), not by a login, so this drop-in does the opposite of the desktop one: it makes systemd bring the profile's namespace and
+# firewall up FIRST (Requires=, not Requisite=) and keeps the manager from starting without them. If the namespace handle is missing or broken the manager fails to start (NetworkNamespacePath);
+# it never starts in the host network. The daemon and the namespace sshd are wanted and ordered before it, not required: a crashed daemon does not take the user's services down with it.
+placement_text_headless() { cat <<EOF
+# nsplit profile $NAME (headless): places $LOGIN's whole user manager, which stays running without a login (lingering), in $NS. Affects user@$UIDN.service only.
+# Requires= (not Requisite=): systemd brings the namespace and the firewall up before the manager, and the manager is stopped with them. If the namespace cannot be joined the manager FAILS to start instead of running unplaced.
+[Unit]
+Requires=nsplit-netns@$NAME.service nsplit-firewall.service
+Wants=nsplit-tailscaled@$NAME.service nsplit-sshd@$NAME.service
+After=nsplit-netns@$NAME.service nsplit-firewall.service nsplit-tailscaled@$NAME.service nsplit-dns@$NAME.service nsplit-sshd@$NAME.service
+[Service]
+NetworkNamespacePath=/run/netns/$NS
+BindReadOnlyPaths=$NETNSETC/$NS/resolv.conf:/etc/resolv.conf
+InaccessiblePaths=-/run/systemd/resolve -/var/lib/tailscale
+BindPaths=/run/tailscale-$NAME:/run/tailscale
+EOF
+}
+# the PAM service of a headless profile's namespace OpenSSH server: the host's own sshd stack, unchanged (it brings pam_systemd), then the placement gate. A login is accepted only when the user manager is
+# active and inside the profile's namespace. Nothing is added to the host's sshd or login stacks for this.
+pam_service_text() { cat <<EOF
+#%PAM-1.0
+# nsplit profile $NAME (headless): the PAM service of the profile's namespace OpenSSH server (PAMServiceName in $ETC/ssh/$NAME/sshd_config). Written by 'nsplit add'; change it with nsplit, not by hand.
+# The host's own sshd stack first (it includes pam_systemd), then the gate: the session is refused unless user@$UIDN.service is active and inside $NS.
+auth      include   sshd
+account   include   sshd
+password  include   sshd
+session   include   sshd
+$(pam_pairs "$NAME")
+EOF
+}
+# sshd_config_text: the namespace OpenSSH server's configuration; a headless profile's names its own PAM service
+sshd_config_text() { subst < "$SHARE/sshd_config.in"
+	if [ "$MODE" = headless ]; then printf '# headless profile: its own PAM service (the host sshd stack, then the placement gate)\nPAMServiceName %s\n' "$PAMSVC"; fi; }
 resolv_public_text() { local s; printf '# nsplit: %s uses public resolvers until its tailnet is signed in (then the split resolver replaces this file).\n' "$NAME"; for s in $PUBLIC_DNS; do printf 'nameserver %s\n' "$s"; done; printf 'options edns0 timeout:2 attempts:2\n'; }
 subst() { sed -e "s|@ETC@|$ETC|g" -e "s|@NAME@|$NAME|g" -e "s|@LOGIN@|$LOGIN|g" -e "s|@NS_IP@|${NS_IP:-}|g" -e "s|@TS_IF@|$TS_IF|g"; }
 
@@ -182,6 +235,11 @@ $who ALL=(root) NOPASSWD: $SCOPED $NAME verify, $SCOPED $NAME dns
 EOF
 }
 
+# headless_notice: what a headless profile is and what it is not
+headless_notice() {
+	say "  NOTE (--mode headless): $LOGIN's user manager will stay running without a login (systemd lingering, switched on last and off again by nsplit remove), inside $NS; the profile is root-managed."
+	say "  A service of $LOGIN that listens on all addresses inside the profile is reachable from the tailnet AND from any process on this machine over the profile's private link ($HOST_IP <-> $NS_IP): bind such a service to the profile's tailnet address if that matters."
+}
 # ssh_notice: the boundary of the chosen SSH mode, printed in the preview, before applying, and at the end. Nothing here claims more than was measured:
 # on a root-managed profile it does not say the built-in server cannot be switched on (that was not tested), only that nsplit status reads it.
 ssh_notice() {
@@ -225,22 +283,23 @@ only_marked_added() { diff <(grep -v '# nsplit:' "$1") <(grep -v '# nsplit:' "$2
 
 # pam_install PROFILE...: (re)write the gated files for exactly these profiles (none = remove the gate). plasmalogin is a copy of the vendor file; login is edited in place with a first-time backup.
 pam_install() {
-	local gpl glg gkept
-	tmp_new gpl; tmp_new glg
-	pam_generate "$PAMVENDOR/plasmalogin" "$ANCH_PL" "$@" > "$gpl" || die "cannot generate the graphical login file (unexpected vendor file layout)"
+	local gpl="" glg gkept haspl=0
+	[ -r "$PAMVENDOR/plasmalogin" ] && haspl=1   # a machine with no Plasma login manager can still have headless profiles: then only the console login stack is gated
+	[ $haspl = 0 ] || tmp_new gpl; tmp_new glg
+	if [ $haspl = 1 ]; then pam_generate "$PAMVENDOR/plasmalogin" "$ANCH_PL" "$@" > "$gpl" || die "cannot generate the graphical login file (unexpected vendor file layout)"; fi
 	pam_generate "$PAMDIR/login" "$ANCH_LG" "$@" > "$glg" || die "cannot generate the console login file (unexpected layout)"
-	only_marked_added "$PAMVENDOR/plasmalogin" "$gpl" && only_marked_added "$PAMDIR/login" "$glg" || die "generated login files differ from the originals by more than the gate lines"
+	{ [ $haspl = 0 ] || only_marked_added "$PAMVENDOR/plasmalogin" "$gpl"; } && only_marked_added "$PAMDIR/login" "$glg" || die "generated login files differ from the originals by more than the gate lines"
 	OWNER=_shared
 	if [ "$#" -eq 0 ]; then
-		if [ "$DRY" = 1 ]; then printf '    would remove the gate lines from %s and %s\n' "$PAMDIR/plasmalogin" "$PAMDIR/login"; tmp_drop "$gpl"; tmp_drop "$glg"; return 0; fi
+		if [ "$DRY" = 1 ]; then printf '    would remove the gate lines from %s and %s\n' "$PAMDIR/plasmalogin" "$PAMDIR/login"; [ -z "$gpl" ] || tmp_drop "$gpl"; tmp_drop "$glg"; return 0; fi
 		if [ -e "$PAMDIR/plasmalogin" ] && grep -q '# nsplit:' "$PAMDIR/plasmalogin"; then
 			if [ "$(own_sha _shared "$PAMDIR/plasmalogin")" = "$(sha "$PAMDIR/plasmalogin")" ]; then rm -f "$PAMDIR/plasmalogin"
 			else tmp_new gkept; grep -v '# nsplit:' "$PAMDIR/plasmalogin" > "$gkept" && cat "$gkept" > "$PAMDIR/plasmalogin"   # changed by hand: only nsplit's own lines come out
 				warn "kept $PAMDIR/plasmalogin: it was changed after nsplit wrote it; only nsplit's gate lines were taken out of it"; fi
 			own_forget _shared "$PAMDIR/plasmalogin"; fi
-	else put "$PAMDIR/plasmalogin" 644 < "$gpl"; fi
+	elif [ $haspl = 1 ]; then put "$PAMDIR/plasmalogin" 644 < "$gpl"; fi
 	pam_edit_login "$glg"
-	tmp_drop "$gpl"; tmp_drop "$glg"
+	[ -z "$gpl" ] || tmp_drop "$gpl"; tmp_drop "$glg"
 }
 pam_edit_login() {
 	local new=$1 prev
@@ -322,9 +381,10 @@ step_ssh() {
 	[ "$SSH" = openssh ] || return 0
 	say "  - OpenSSH inside the namespace"
 	local d=$ETC/ssh/$NAME; OWNER=$NAME
-	put "$d/sshd_config" 644 < <(subst < "$SHARE/sshd_config.in")
+	put "$d/sshd_config" 644 < <(sshd_config_text)
+	[ "$MODE" != headless ] || put "$PAMDIR/$PAMSVC" 644 < <(pam_service_text)   # before the server starts: it reads this service for every login
 	# No root-managed authorized_keys is created: it is the administrator's file if they want one (see the sshd_config), so nsplit neither writes nor owns it.
-	if [ "$DRY" = 1 ]; then printf '    would create: %s/ssh_host_ed25519_key(.pub)\n' "$d"; run $SYSTEMCTL enable --now "nsplit-sshd@$NAME.service"; return 0; fi
+	if [ "$DRY" = 1 ]; then printf '    would create: %s/ssh_host_ed25519_key(.pub)\n' "$d"; [ "$MODE" != headless ] || printf '    would check: sshd -T reports PAMServiceName %s for the generated configuration\n' "$PAMSVC"; run $SYSTEMCTL enable --now "nsplit-sshd@$NAME.service"; return 0; fi
 	if [ ! -e "$d/ssh_host_ed25519_key" ]; then
 		ssh-keygen -q -t ed25519 -N '' -C "nsplit-$NAME@$(cat /proc/sys/kernel/hostname)" -f "$d/ssh_host_ed25519_key" || die "ssh-keygen failed"
 		chmod 600 "$d/ssh_host_ed25519_key"; chmod 644 "$d/ssh_host_ed25519_key.pub"
@@ -332,6 +392,10 @@ step_ssh() {
 		undo_push put_remove "$NAME" "$d/ssh_host_ed25519_key"; undo_push put_remove "$NAME" "$d/ssh_host_ed25519_key.pub"
 	fi
 	/usr/bin/sshd -t -f "$d/sshd_config" || die "the generated sshd configuration does not parse"
+	if [ "$MODE" = headless ]; then   # the server must really use the profile's own PAM service: ask it, do not assume the option exists
+		local eff; eff=$(/usr/bin/sshd -T -f "$d/sshd_config" 2>/dev/null)   # captured first: under pipefail a grep -q that quits at its match would make sshd die of SIGPIPE and the pipeline look failed
+		grep -qix "pamservicename $PAMSVC" <<<"$eff" || die "this OpenSSH does not report PAMServiceName $PAMSVC for the generated configuration, so the profile's own PAM service (the placement gate) would not be used; nothing was left in place"
+	fi
 	undo_push $SYSTEMCTL disable --now "nsplit-sshd@$NAME.service"   # before the enable: `enable --now` can enable the unit and then fail to start it
 	$SYSTEMCTL enable --now "nsplit-sshd@$NAME.service" || die "the namespace sshd did not start"
 }
@@ -348,6 +412,22 @@ step_gate() {
 	local names; names=$(printf '%s\n' $(profile_names) "$NAME" | sort -u)   # the profile being added is in the list once, whether or not its file exists yet (preview)
 	# shellcheck disable=SC2086
 	pam_install $names
+}
+
+# step_linger (headless only): the very last change. Lingering makes systemd-logind start the user's manager without a login and keep it; by now the namespace, the firewall, the daemon, the placement drop-in,
+# the namespace sshd and the login gate are all in place, so the manager is born inside the profile's namespace. The marker records that nsplit switched lingering on (removal switches it off only then).
+step_linger() {
+	[ "$MODE" = headless ] || return 0
+	say "  - lingering: $LOGIN's user manager stays running without a login, inside $NS (switched on last; nsplit remove switches it off again)"
+	if [ "$DRY" = 1 ]; then printf '    would run: %s enable-linger %s   (after everything above is in place; recorded in %s/%s)\n' "$LOGINCTL" "$LOGIN" "$LINGERMARK" "$NAME"; return 0; fi
+	[ "$(linger_state "$LOGIN")" = off ] || die "lingering for $LOGIN is on already (or cannot be read): not taking it over"
+	mkdir -p "$LINGERMARK"; printf '%s %s\n' "$LOGIN" "$UIDN" > "$LINGERMARK/$NAME"
+	undo_push linger_release "$NAME" "$LOGIN" "$UIDN"   # the newest undo step: it runs first, before the placement and the units go
+	$LOGINCTL enable-linger "$LOGIN" || die "loginctl enable-linger $LOGIN failed"
+	# logind starts the manager itself, but not when its own record of a user whose manager was stopped a moment ago (a removal right before this add) says it is already running: seen in a guest run (the wait
+	# below expired with no manager). Asking systemd directly as well makes the outcome independent of that bookkeeping; if the manager is already starting this changes nothing.
+	$SYSTEMCTL start "user@$UIDN.service" >/dev/null 2>&1
+	manager_wait_up "$UIDN" "${NSPLIT_MANAGER_WAIT:-60}" || die "the user manager of $LOGIN did not start after lingering was switched on (see: journalctl -u user@$UIDN.service)"
 }
 
 step_operator() { # the enrolment's policy, applied explicitly either way: owner-managed = the user is the node's operator, root-managed = nobody is
@@ -416,11 +496,23 @@ add_checks() {
 	# placement as systemd sees it
 	[ "$($SYSTEMCTL show -p NetworkNamespacePath --value "user@$UIDN.service" 2>/dev/null)" = "/run/netns/$NS" ] && okc "systemd will start user@$UIDN.service inside $NS" || badc "systemd does not show the placement for user@$UIDN.service"
 	# the login gate
-	grep -q 'nsplit-pam-gate' "$PAMDIR/plasmalogin" && grep -q 'nsplit-pam-gate' "$PAMDIR/login" && okc "both login stacks carry the gate" || badc "the gate lines are missing from a login stack"
+	if [ "$MODE" = headless ] && [ ! -e "$PAMDIR/plasmalogin" ]; then grep -q 'nsplit-pam-gate' "$PAMDIR/login" && okc "the console login stack carries the gate (this machine has no Plasma login manager)" || badc "the gate lines are missing from the console login stack"
+	else grep -q 'nsplit-pam-gate' "$PAMDIR/plasmalogin" && grep -q 'nsplit-pam-gate' "$PAMDIR/login" && okc "both login stacks carry the gate" || badc "the gate lines are missing from a login stack"; fi
 	if [ -z "$(manager_pid "$UIDN")" ]; then
 		PAM_TYPE=open_session PAM_USER="$LOGIN" PAM_SERVICE=login "$GATE" "$LOGIN" "$UIDN" "$NS" >/dev/null 2>&1 && badc "NEGATIVE: the gate lets $LOGIN in with no user manager" || okc "NEGATIVE: the gate refuses $LOGIN while no user manager is placed"
 	else skipc "gate refusal test ($LOGIN has a running user manager)"; fi
 	PAM_TYPE=open_session PAM_USER=root PAM_SERVICE=login "$GATE" "$LOGIN" "$UIDN" "$NS" >/dev/null 2>&1 && okc "CONTROL: another user passes the gate untouched" || badc "another user is blocked by the gate"
+	if [ "$MODE" = headless ]; then
+		local mp ref
+		[ "$(linger_state "$LOGIN")" = on ] && [ -e "$LINGERMARK/$NAME" ] && okc "lingering is on for $LOGIN and nsplit recorded that it switched it on" || badc "lingering is not on for $LOGIN, or nsplit's record of it is missing"
+		mp=$(manager_pid "$UIDN"); ref=$(ns_obj "$NETNSRUN/$NS")
+		if [ -n "$mp" ] && [ -n "$ref" ] && [ "$(ns_obj "/proc/$mp/ns/net")" = "$ref" ]; then okc "$LOGIN's user manager (pid $mp), running without a login, is inside $NS"
+		elif [ -n "$mp" ]; then badc "$LOGIN's user manager (pid $mp) is not inside $NS"; else badc "no user manager is running for $LOGIN although lingering is on"; fi
+		[ "$(unit_state "nsplit-sshd@$NAME.service")" = active ] && okc "the namespace OpenSSH server is running" || badc "the namespace OpenSSH server is not running"
+		grep -q "nsplit-pam-gate $LOGIN $UIDN $NS" "$PAMDIR/$PAMSVC" 2>/dev/null && [ -x "$GATE" ] && okc "the namespace sshd's own PAM service carries the placement gate" || badc "the placement gate is missing from $PAMDIR/$PAMSVC"
+		o=$(node_ssh "$NAME")
+		case $o in off) okc "built-in Tailscale SSH is off on the node";; on) badc "built-in Tailscale SSH is ON for the node of a headless profile";; *) skipc "built-in Tailscale SSH setting (the node's preferences could not be read)";; esac
+	fi
 	printf '  %s passed, %s failed\n' "$pass" "$fails"
 	[ $fails = 0 ]
 }
@@ -428,16 +520,18 @@ add_checks() {
 # ---- the command ---------------------------------------------------------------------------------------------------------
 apply_all() {
 	# an interrupt that arrives during a step is acted on here, between steps, when every change so far has its undo registered
-	step_files; intr_check; step_guard; intr_check; step_dbus; intr_check; step_start; intr_check; step_ssh; intr_check; step_operator; intr_check; step_scoped; intr_check; step_placement; intr_check; step_gate; intr_check
+	step_files; intr_check; step_guard; intr_check; step_dbus; intr_check; step_start; intr_check; step_ssh; intr_check; step_operator; intr_check; step_scoped; intr_check; step_placement; intr_check; step_gate; intr_check; step_linger; intr_check
 }
 
 cmd_add() {
 	local yes=0 ssh_arg="" ans why
-	DRY_REQ=0; BUSY_NOTE=""; MANAGED=owner; MARK_MADE=0; LOGIN=""; NAME=""; SSH=none; HOSTNAME_ARG=""; UPLINKS_ARG=""; ACK_TS=0
+	DRY_REQ=0; BUSY_NOTE=""; MANAGED=owner; MARK_MADE=0; LOGIN=""; NAME=""; SSH=none; HOSTNAME_ARG=""; UPLINKS_ARG=""; ACK_TS=0; MODE=desktop
 	while [ $# -gt 0 ]; do case $1 in
 		-h|--help) usage_add; return 0;;
 		--dry-run) DRY_REQ=1; shift;; --yes|-y) yes=1; shift;;
 		--name) NAME=${2:?--name needs a value}; shift 2;;
+		--mode) MODE=${2:?--mode needs desktop|headless}; shift 2;;
+		--mode=*) MODE=${1#--mode=}; shift;;
 		--ssh) ssh_arg=${2:?--ssh needs none|tailscale|openssh}; shift 2;;
 		--accept-tailscale-ssh-risk) ACK_TS=1; shift;;
 		--hostname) HOSTNAME_ARG=${2:?--hostname needs a value}; shift 2;;
@@ -447,6 +541,8 @@ cmd_add() {
 		*) [ -z "$LOGIN" ] || die "one user at a time"; LOGIN=$1; shift;;
 	esac; done
 	[ -n "$LOGIN" ] || { usage_add >&2; exit 2; }
+	case $MODE in desktop|headless) ;; *) die "--mode must be desktop or headless";; esac
+	if [ "$MODE" = headless ]; then MANAGED=root; [ -n "$ssh_arg" ] || ssh_arg=openssh; fi   # a headless profile is always root-managed and reached through the namespace OpenSSH server
 	[ -z "$ssh_arg" ] || SSH=$ssh_arg
 	case $SSH in none|tailscale|openssh) ;; *) die "--ssh must be none, tailscale or openssh";; esac
 	[ "$DRY_REQ" = 1 ] || need_root
@@ -455,8 +551,9 @@ cmd_add() {
 	say "nsplit add: $LOGIN$( [ "$NAME" != "$LOGIN" ] && echo " (profile $NAME)" )"
 	add_preflight || { say "Nothing was changed."; exit 1; }
 	[ -z "$BUSY_NOTE" ] || info "NOTE: a real run would be refused right now: $BUSY_NOTE"
-	say "  uid $UIDN   namespace $NS   link $HOST_IP <-> $NS_IP   node name $TS_HOSTNAME   uplinks: $UPLINKS_USED   ssh: $SSH   management: $MANAGED"
+	say "  uid $UIDN   namespace $NS   link $HOST_IP <-> $NS_IP   node name $TS_HOSTNAME   uplinks: $UPLINKS_USED   ssh: $SSH   management: $MANAGED   mode: $MODE"
 	say "  LIMIT: only logins and user managers are checked. Programs of $LOGIN outside any session (cron/at jobs, system services running as uid $UIDN, sudo -u or su from another account) are not detected: they lose their host network when the guard loads and are not placed in $NS."
+	[ "$MODE" != headless ] || headless_notice
 	ssh_notice
 	say; say "Changes:"
 	DRY=1; apply_all; DRY=0
@@ -469,12 +566,22 @@ cmd_add() {
 	say; say "Applying:"
 	APPLYING=1   # from here a failure or an interrupt undoes what was done (nsplit_atexit)
 	apply_all
-	if ! add_checks; then rollback_all; APPLYING=0; die "a check failed; everything this command did was undone"; fi
+	if ! add_checks; then rollback_all; APPLYING=0
+		[ "$UNDO_FAILED" = 0 ] || die "a check failed, and not everything this command did could be undone: the undo steps that failed are listed above; nsplit status and nsplit remove show and finish what is left"
+		die "a check failed; everything this command did was undone"; fi
 	APPLYING=0
 	say; say "Done. $LOGIN has a network of their own (not yet signed in to Tailscale)."
 	ssh_notice
+	if [ "$MODE" = headless ]; then
+		headless_notice
+		say "Next:  sudo nsplit login $NAME     (an administrator runs it; the user opens the sign-in link and approves their own Tailscale account)"
+		say "       Then $LOGIN puts a public key in their ~/.ssh and connects with ordinary OpenSSH to the profile's Tailscale address (or name), and starts their own services with systemctl --user."
+		say "       $LOGIN's user manager is already running inside $NS; their enabled user services start at boot, stay up across logouts, and run in the profile's network."
+		say "       A login of $LOGIN is accepted only when that manager is running inside $NS: otherwise it is refused (journalctl -t nsplit-pam-gate, nsplit status)."
+	else
 	say "Next:  nsplit login $NAME     (the user opens the sign-in link and approves their own Tailscale account)"
 	say "       Their next login uses the new network."
 	say "       If a login of $LOGIN is ever refused, a console login prints the reason; the graphical login screen just resets, and the reason is in the log (journalctl -t nsplit-pam-gate) and in: nsplit status"
 	say "       Reminder: programs of $LOGIN running outside any login session (cron/at jobs, system services run as this uid) have no host network now and are not placed in $NS."
+	fi
 }

@@ -18,7 +18,7 @@ The test environment was a disposable CachyOS guest using the documented
 systemd/Plasma-login-manager integration. Documentation-only changes do not
 extend the tested runtime scope.
 
-**This snapshot is 0.1.0-17.** 0.1.0-13 added the MIT license and its packaging only:
+**This snapshot is 0.2.0-alpha.1**, which adds [headless profiles](#headless-profiles-020-alpha1) to 0.1.0-17 (everything below about 0.1.0-17 and earlier still describes the code those profiles share). 0.1.0-13 added the MIT license and its packaging only:
 building both packages and comparing them showed the 25 installed program files
 byte-identical, in content and mode, to the reviewed 0.1.0-12 package, and the only added
 file was `/usr/share/licenses/nsplit/LICENSE`. **0.1.0-14 is different: it changes
@@ -31,6 +31,8 @@ packages showed 31 installed files, exactly those two different) to fix #7 and #
 [below](#defect-10-fixed-in-010-16), and the other three for #9, see [below](#issue-9-acknowledgement-and-status-for---ssh-tailscale-0110-16).
 **0.1.0-17 changes three files relative to -16** (`bin/nsplit`, `cmd-add.sh` and `common.sh`; comparing the two packages showed 31 installed files, exactly those three different), for #17, see
 [below](#issue-17-fixed-in-0110-17).
+**0.2.0-alpha.1 changes four files relative to -17** (`cmd-add.sh`, `cmd-ops.sh`, `cmd-status.sh` and `common.sh`, which also carries the version string; comparing the two packages showed 31 installed files, exactly those four different, with the same modes), see
+[below](#headless-profiles-020-alpha1).
 The guest tests of the fixes ran on the 0.1.0-12 baseline package, with the changed files
 copied over it (originals restored and checked afterwards). The -13 package was not installed.
 **The -14 package built from this repository (main 49ed71b) was installed over 0.1.0-12 in
@@ -351,6 +353,45 @@ their creation and their rename (only the registry's behaviour is checked, no fa
 purpose when a repair cannot be rolled back) was not changed. One check of the guest baseline failed (the three original profiles read Degraded right after the guest booted, because its mount watcher is
 off and nothing had repaired their lost mounts yet, as in [#1](https://github.com/IsaacNudeton/nsplit-linux/issues/1)); they read as before in every later phase.
 
+### Headless profiles (0.2.0-alpha.1)
+
+**[#13](https://github.com/IsaacNudeton/nsplit-linux/issues/13), phase 2: `nsplit add USER --mode headless`.** *What it is:* the profile's user manager (`user@UID.service`) is kept running without a login by systemd lingering, inside the profile's
+namespace, and the user is reached through the profile's own OpenSSH server over their tailnet with a dedicated PAM service (the host's `sshd` stack, then the placement gate). The profile is root-managed, needs no Plasma login manager,
+and switches lingering on last and off again on failure and removal; the design is described in [Usage](USAGE.md#headless-profiles---mode-headless-alpha) and [Security](../SECURITY.md).
+*Found by the guest tests (each changed the product, each now has an off-host fake that reproduces it and a mutant):* (1) on systemd 262 every user manager has a logind session of its own (class `manager`, service `systemd-user`), and `nsplit
+remove` counted it as a login and refused; sessions of class `manager` and `manager-early` are no longer counted (any other class, and a class that cannot be read, still are). (2) After a removal, a headless add whose `enable-linger` had
+succeeded once saw no manager start for 60 seconds and ended: logind did not start it (not reproducible in isolation: six remove-and-add cycles in a row all started it; it followed a sequence of manual stops and starts of that manager);
+nsplit now also asks systemd to start `user@UID.service` after switching lingering on (harmless when it is starting already). (3) The test's held login ran a command without a terminal, so after the client was killed the remote command and the
+logind session survived (state *closing*, scope abandoned) and `nsplit remove` refused, correctly; `loginctl terminate-session` did not end it, `kill-session --signal=KILL` did. The refusal text of a headless profile now names the session and
+`kill-session` instead of suggesting `terminate-user` (which would also end the lingering manager).
+*Tested off-host:* 86 checks (a fake `systemctl`, `loginctl`, `tailscale` and `nft`, real OpenSSH reading the generated configuration with `sshd -T`): the preview and the options (nothing changes); no Plasma login manager (headless works, desktop still refuses
+clearly); a fresh add (network first, lingering last, a manager inside the namespace without a login); the preflight refusals (lingering already on, a lingering directory that cannot be read, a PAM service file that nsplit did not make, no host `sshd` PAM service to include, a leftover linger record, a login session, a running manager) with nothing
+changed; failed and interrupted adds undone, lingering and the manager included (a failing `enable-linger`, a manager that never starts, a failing post-apply check, a failing undo reported as unfinished); stop, start and remove (lingering that
+nsplit did not switch on is never touched; a failing `disable-linger` keeps the placement); status (a manager that is missing, unplaced or unreadable is never Ready); and a desktop profile next to a headless one unchanged. The same checks fail
+67 of 86 against the code without the feature (public main at 8973523), and 24 mutants that each remove one safeguard (lingering not last, `Requires=` weakened to `Requisite=`, no PAM service file, no `PAMServiceName`, the gate before the host's stack,
+an undo that is not registered, a removal that keeps lingering, a status that calls an unknown placement Ready, the manager's own session counted as a login, …) are each rejected by named checks. The older suites pass unchanged on the same tree:
+403, 98, 46, 21, 30, 38 and 89 checks.
+*Tested in the disposable guest,* on the real package `nsplit-0.2.0alpha.1-1` (sha256 `7abbdfa9dd33fde8e493dba16a9dfe2e37b867c167ce69d566c6db62e47cb3df`, installed in place over 0.1.0-17; systemd 262.1, Tailscale 1.104.2, OpenSSH 10.6p1), against a
+throwaway control server (headscale) inside a private lab network whose only routes were lab-internal, so that nothing left the machine and no real Tailscale control server was used: the upgrade (package files as built, the original profiles' daemons
+not restarted); a headless add with the Plasma login manager's files moved aside (only the console login stack gated, removal in one pass, the host state identical afterwards); a headless add with them present: the manager running with no login session,
+inside the profile's namespace, after the namespace, the daemon and the namespace sshd (systemd's own timestamps), the placement drop-in *requiring* the namespace and the firewall, `sshd -T` reporting the dedicated PAM service, the host's own `sshd` and
+PAM files untouched; the user's node signed in to the lab, `nsplit status` Ready; a service the user enabled and started **without any login** (through the lingering manager) running in the profile's namespace and reached by a remote tailnet client, not on the
+host's loopback or its ordinary interface, and reachable from a host process over the private link (documented, and warned about by the add); ordinary OpenSSH over the tailnet as the owner (the namespace, resolver file and Tailscale socket are the profile's, the
+session's manager is the lingering one, the session's logind `Service` is the dedicated PAM service, SFTP works), with root, two other local accounts and a name that does not exist refused (each with a control that the same client and key get in on a plain
+OpenSSH), password and keyboard-interactive authentication not offered, and port, agent and environment forwarding refused (each with the same control); the owner refused when switching the built-in Tailscale SSH on (including a full `tailscale up --ssh`),
+root able to, and status reporting that as Degraded; with the namespace handle removed the manager would not start (status 226/NAMESPACE) and no process of the user was in the host's network; with the gate not executable and with the PAM service file missing the SSH
+login was refused (a control each: the login works again once restored); with the placement drop-in removed by hand the manager ran in the host's network, status said Degraded naming the restart, the SSH login was refused by the gate, and a process of the user in
+the host namespace could not reach the network beyond loopback; stop (the manager stops with the namespace) and start (the manager comes back after the namespace and the firewall); an add that fails at its own post-apply check after lingering was switched on, undone
+completely (lingering, manager, marker, PAM service, record; the guest's whole recorded state identical to before); remove and stop refused while a login session exists; removal in one pass of a profile with a lingering manager and the user's own unit file untouched (the
+guest's state identical to before the add); re-adding it; and **one real guest reboot**: the manager active and placed right after boot with no login session, after the namespace and the firewall, the user's enabled service started by itself, the node Running again
+without a new sign-in, the service answering the tailnet peer, and an ordinary key login working. Four complete guest runs: the first three each found one of the issues above or a mistake of the test script, and are kept annotated; the fourth, on the final package,
+ran everything including the reboot: 181 checks, 3 failed, all three failures being mistakes of the test's own closing comparison and one of its self-tests (the lab's tailnet peer left `/var/lib/tailscale` behind, which the comparison with the guest's first state
+reported; PIDs recorded before the reboot were compared with the PIDs after it; and the check that no nsplit unit had failed was vacuous because of a `systemctl` argument form, which was then rebuilt with a planted failed unit proving it can reject), classified on
+the real end state and rerun; every check of the product passed.
+*Not tested:* more than one headless profile at a time in the guest (the off-host suite covers a desktop and a headless profile together); a real Tailscale control server; Tailscale's built-in SSH as the way in (it is refused by construction in this mode); a user who
+already had lingering before the add (refused by the preflight, tested off-host only); other systemd, OpenSSH, Tailscale or kernel versions; cron or `at` jobs, system services running as the user, and `sudo -u` or `su` from another account (the UID guard's documented limit);
+any GPU workload; sessions that do not end (an abandoned logind session needs `loginctl kill-session`, as the refusal says); a real workstation (nothing was installed on one); and independent review.
+
 ## Former known issues
 
 The focused test above, and a read-only inspection, found three problems. Each is fixed in
@@ -458,7 +499,7 @@ does not configure this.
 - The fixes of the three former issues were tested as changed files over the 0.1.0-12 baseline
   package; the 0.1.0-14 package built from this repository was exercised in the Tailscale SSH test, the
   0.1.0-15 package, upgraded in place from -14, for the fixes of #7 and #8 only, and the 0.1.0-16 package,
-  upgraded in place from -15, for the changes of #9 and #10 only, and the 0.1.0-17 package, upgraded in place from -16, for the change of #17 only. This documentation is
+  upgraded in place from -15, for the changes of #9 and #10 only, and the 0.1.0-17 package, upgraded in place from -16, for the change of #17 only, and the 0.2.0alpha.1 package, upgraded in place from -17, for headless profiles only. This documentation is
   not a claim that the package is ready for any particular deployment.
 - A fresh `nsplit add` on the final -12 guest package, a graphical desktop run on
   that package, or an installation on the real workstation was not demonstrated

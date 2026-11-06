@@ -5,10 +5,35 @@ targets() { # targets ARG -> profile names ("--all" = every profile)
 	if [ "${1:-}" = "--all" ]; then profile_names; return; fi
 	[ -n "${1:-}" ] || { resolve_profile "" || die "name a profile (or --all); see: nsplit status"; return; }
 	resolve_profile "$1" || die "no nsplit profile '$1' (see: nsplit status)"; }
-# profile_busy N: user_busy for that profile's user (0 = in use, 1 = not, 2 = could not tell; the callers treat 2 like 0)
-profile_busy() { ( . "$PROFDIR/$1.env"; user_busy "$LOGIN" "$UIDN" ); }
-# profile_units N: the units one profile owns, in the order they are stopped
+# profile_busy N: is the profile's user in use? 0 = yes, 1 = not, 2 = could not tell; the callers treat 2 like 0.
+# A desktop profile counts a login session OR a running user manager. A headless profile's manager is meant to be running (lingering), so only a login session counts.
+profile_busy() { ( . "$PROFDIR/$1.env"; if [ "${MODE:-}" = headless ]; then user_sessions "$LOGIN" "$UIDN"; else user_busy "$LOGIN" "$UIDN"; fi ); }
+# busy_what N: the words for what profile_busy found
+busy_what() { local m; m=$( . "$PROFDIR/$1.env"; printf %s "${MODE:-}" ); if [ "$m" = headless ]; then printf 'has a login session'; else printf 'is logged in (or has a running user manager)'; fi; }
+# profile_units N: the units one profile owns, in the order they are stopped (a headless profile's user manager is stopped before them: see stop_manager)
 profile_units() { printf 'nsplit-sshd@%s.service nsplit-dns@%s.service nsplit-tailscaled@%s.service nsplit-netns@%s.service' "$1" "$1" "$1" "$1"; }
+# manager_wait_down UID [TRIES]: 0 once user@UID.service is inactive or failed, 1 if it is still up or changing after TRIES seconds (default 30)
+manager_wait_down() { local i st; for i in $(seq "${2:-30}"); do st=$(unit_state "user@$1.service"); case $st in inactive|failed) return 0;; esac; sleep 1; done; return 1; }
+# manager_wait_up UID [TRIES]: 0 once user@UID.service is active with a main process
+manager_wait_up() { local i; for i in $(seq "${2:-60}"); do [ "$(unit_state "user@$1.service")" = active ] && [ -n "$(manager_pid "$1")" ] && return 0; intr_check; sleep 1; done; return 1; }
+# linger_release NAME LOGIN UID: take back the lingering nsplit switched on for a headless profile's user and make sure the manager that lingering kept alive is stopped.
+# Lingering nsplit did not switch on (no marker) is never touched. With a login session nothing is changed. 0 = lingering is off, the manager is down and the marker is gone (or there was nothing of nsplit's to undo); 1 = something is still on (said on stderr).
+linger_release() {
+	local n=$1 l=$2 u=$3 mark; mark=$LINGERMARK/$n   # (not in the same local statement: its words are expanded before any of the assignments)
+	if [ ! -e "$mark" ]; then
+		[ "$(linger_state "$l")" != on ] || warn "lingering for $l is on, but nsplit did not switch it on for $n: it is left as it is"
+		return 0; fi
+	user_sessions "$l" "$u"; case $? in
+	0) warn "$l has a login session: lingering for $l is left on and the user manager is left running"; return 1;;
+	1) ;;
+	*) warn "could not tell whether $l has a login session (loginctl did not answer): lingering for $l is left on"; return 1;;
+	esac
+	$LOGINCTL disable-linger "$l" >/dev/null 2>&1
+	[ "$(linger_state "$l")" = off ] || { warn "lingering for $l is still on after loginctl disable-linger"; return 1; }
+	$SYSTEMCTL stop "user@$u.service" >/dev/null 2>&1
+	manager_wait_down "$u" 30 || { warn "user@$u.service is still $(unit_state "user@$u.service") after lingering was switched off and a stop was asked for"; return 1; }
+	rm -f "$mark"; rmdir "$LINGERMARK" 2>/dev/null; return 0
+}
 # unit_facts UNIT: ActiveState, SubState, Result, MainPID and ControlPID of a unit, read together, into U_ACTIVE U_SUB U_RESULT U_MAIN U_CTRL.
 # Fails (and leaves them empty) when any of the five is missing or a process id is not a number: nothing is concluded from a state that could not be read.
 unit_facts() {
@@ -34,8 +59,11 @@ stop_profile() {
 	units=$(profile_units "$n")
 	# shellcheck disable=SC2086
 	$SYSTEMCTL reset-failed $units >/dev/null 2>&1   # a failed state seen below then comes from THIS attempt, not from an old crash
+	# a headless profile's user manager (kept running by lingering) goes first: it is what the user's own services run under, and it must be gone before the namespace is
+	if [ "$(profile_mode)" = headless ]; then $SYSTEMCTL reset-failed "user@$P_UIDN.service" >/dev/null 2>&1; $SYSTEMCTL stop "user@$P_UIDN.service" || rc=1; fi
 	# shellcheck disable=SC2086
 	if [ "$how" = disable ]; then $SYSTEMCTL disable --now $units || rc=1; else $SYSTEMCTL stop $units || rc=1; fi
+	if [ "$(profile_mode)" = headless ]; then st=$(unit_state "user@$P_UIDN.service"); [ "$st" = inactive ] || left+="user@$P_UIDN.service is $st; "; fi
 	for u in $units; do st=$(unit_state "$u")
 		[ "$st" = inactive ] && continue
 		if [ "$u" = "$ts" ] && [ "$st" = failed ] && [ $rc = 0 ] && killed_by_stop_timeout "$u"; then forced=$u; continue; fi
@@ -53,12 +81,19 @@ stop_profile() {
 	return 1
 }
 # busy_hint N: what to add to a refusal because the user is logged in: an abandoned shell counts as logged in, and the administrator can end it explicitly (nsplit never does)
-busy_hint() { local l; l=$( . "$PROFDIR/$1.env"; printf %s "$LOGIN" )
-	printf 'A shell left behind by an abruptly closed Tailscale SSH connection counts as logged in. If nobody is really using the account, an administrator can end every process of that user with: loginctl terminate-user %s (nsplit never runs that for you).' "$l"; }
+busy_hint() { local l m u ids; eval "$( . "$PROFDIR/$1.env"; printf 'l=%q m=%q u=%q' "$LOGIN" "${MODE:-}" "$UIDN" )"
+	if [ "$m" = headless ]; then
+		ids=$(user_session_ids "$l" "$u")
+		printf 'A login left behind by an abruptly closed connection (session state "closing", its processes still running) counts as logged in. Its logind session(s): %s. If nobody is really using the account, an administrator can end one with: loginctl terminate-session ID (and, if its processes survive that, loginctl kill-session ID --signal=KILL). `loginctl terminate-user %s` is not suggested for a headless profile: it would also end the lingering user manager. nsplit never runs any of these for you.' "${ids:-?}" "$l"
+	else
+		printf 'A shell left behind by an abruptly closed Tailscale SSH connection counts as logged in. If nobody is really using the account, an administrator can end every process of that user with: loginctl terminate-user %s (nsplit never runs that for you).' "$l"
+	fi
+}
 
 usage_start() { cat <<'EOF2'
 usage: nsplit start (PROFILE | --all)
   Start a profile's managed networking now: namespace, firewall, Tailscale daemon, private DNS, and its SSH server if it has one.
+  A headless profile's user manager (kept running by lingering that nsplit switched on) is started last, inside the profile's namespace.
   (They also start at boot; this is for starting one after nsplit stop.)
   An already-running daemon with unsafe socket permissions or multiple socket hard links is restarted to replace the listener and close its existing connections.
   This can interrupt that profile's connections, including its Tailscale SSH sessions. An already-running daemon whose current socket checks pass is not restarted.
@@ -107,6 +142,10 @@ cmd_start() {
 		fi
 		[ -f "$ETC/dns/$n.conf" ] && { $SYSTEMCTL start "nsplit-dns@$n.service" || warn "private DNS for $n did not start"; }
 		[ "$P_SSH" = openssh ] && { $SYSTEMCTL start "nsplit-sshd@$n.service" || warn "the namespace sshd for $n did not start"; }
+		# a headless profile's user manager (lingering) comes back last, after the namespace, the firewall and the daemon it is placed with; if nsplit did not switch lingering on there is no manager to bring back
+		if [ "$(profile_mode)" = headless ] && [ -e "$LINGERMARK/$n" ] && [ "$(linger_state "$P_LOGIN")" = on ]; then
+			$SYSTEMCTL start "user@$P_UIDN.service" || warn "the user manager of $P_LOGIN did not start (see: journalctl -u user@$P_UIDN.service); nsplit status $n shows what is missing"
+		fi
 		say "started $n"
 	done
 	# the start boundary: a service of ANY profile that was already running may have lost a mount while the host paths were replaced (nothing is restarted by this)
@@ -118,6 +157,7 @@ usage_stop() { cat <<'EOF2'
 usage: nsplit stop (PROFILE | --all) [--force]
   Stop a profile's managed networking now (it starts again at boot, or with nsplit start). Stopping the namespace ends every process inside it,
   so it refuses while the user is logged in (or when that cannot be checked) unless --force. --all also stops the shared firewall.
+  A headless profile's user manager is meant to be running, so only a login session (SSH or console) counts as "logged in" for it; the manager is stopped first and lingering stays on (nsplit start brings the manager back).
   It reports "stopped" only after checking that every unit is down and the namespace is gone; otherwise it says what is still up and exits 1.
   With a Tailscale SSH session open the Tailscale daemon may not exit within systemd's stop time-out and is killed (Tailscale's own behaviour). When nothing of the profile is left running
   nsplit clears the daemon's leftover failed state, reports "stopped" and warns that the stop was not graceful. A daemon or namespace that is still there is never reported as stopped.
@@ -128,7 +168,7 @@ cmd_stop() {
 	while [ $# -gt 0 ]; do case $1 in -h|--help) usage_stop; return 0;; --force) force=1; shift;; *) arg=$1; shift;; esac; done
 	need_root; a=$(targets "$arg"); [ -n "$a" ] || die "no profiles"
 	if [ "$force" != 1 ]; then for n in $a; do profile_busy "$n"; case $? in
-		0) die "$n is logged in (or has a running user manager). Log them out first, or use --force to end their session. $(busy_hint "$n")";;
+		0) die "$n $(busy_what "$n"). Log them out first, or use --force to end their session. $(busy_hint "$n")";;
 		1) ;;
 		*) die "could not tell whether $n is logged in (loginctl or systemctl did not answer), so nothing was stopped. Check that systemd-logind is running, or use --force.";;
 	esac; done; fi
@@ -154,12 +194,14 @@ usage: nsplit remove PROFILE [--purge] [--dry-run] [--yes]
   and it does not make the removal fail. (The one exception is a copy that is still exactly what nsplit 0.1.0-12/-13 wrote, which holds no keys.)
   The profile's Tailscale node identity (/var/lib/tailscale-PROFILE) is KEPT so adding the profile again needs no new sign-in; --purge deletes it
   (the node stays listed in the user's tailnet admin console until they remove it there).
-  Refuses while the user is logged in (or when that cannot be checked). If any part cannot be completed, or a file nsplit made was changed by hand
+  Refuses while the user is logged in (or when that cannot be checked). A headless profile's lingering user manager does not count as a login (only a session does): it is stopped, the lingering nsplit switched on for it is
+  switched off, and only then is the placement taken away; if lingering cannot be switched off the placement stays and the removal is reported as not finished. Lingering that nsplit did not switch on is never touched.
+  If any part cannot be completed, or a file nsplit made was changed by hand
   (it is never deleted or overwritten), the profile and its records are kept, the unresolved items are listed, the exit status is 1, and the same command finishes the job once they are dealt with.
 EOF2
 }
 cmd_remove() {
-	local purge=0 arg="" dry=0 yes=0 n ans fails=0 kept=0 f rest pl rec rc unresolved="" keyfile
+	local purge=0 arg="" dry=0 yes=0 n ans fails=0 kept=0 f rest pl rec rc unresolved="" keyfile lingerok
 	while [ $# -gt 0 ]; do case $1 in -h|--help) usage_remove; return 0;; --purge) purge=1; shift;; --dry-run) dry=1; shift;; --yes|-y) yes=1; shift;; -*) die "unknown option $1";; *) arg=$1; shift;; esac; done
 	[ -n "$arg" ] || { usage_remove >&2; exit 2; }
 	n=$(resolve_profile "$arg") || die "no nsplit profile '$arg'"
@@ -168,6 +210,7 @@ cmd_remove() {
 	ensure_logged_out "$n"
 	say "nsplit remove: $n ($P_LOGIN, uid $P_UIDN)"
 	say "  will stop: nsplit-netns@$n nsplit-tailscaled@$n nsplit-dns@$n nsplit-sshd@$n (the firewall stays while other profiles remain)"
+	[ "$(profile_mode)" != headless ] || say "  headless profile: $P_LOGIN's user manager is stopped first and the lingering nsplit switched on for it is switched off again (refused while $P_LOGIN has a login session; the account and home stay)"
 	say "  will remove: the placement drop-in, the login-gate lines for $P_LOGIN, the D-Bus policy, the uid-guard entry, the ufw route rules, and every file nsplit created for $n:"
 	keyfile=$ETC/ssh/$n/authorized_keys
 	own_paths "$n" | while IFS= read -r f; do
@@ -191,8 +234,11 @@ cmd_remove() {
 		esac; return $r; }
 	rest=$(profile_names | grep -vx "$n" | tr '\n' ' ')
 	pl="$SDIR/user@$P_UIDN.service.d/50-nsplit.conf"
+	# a headless profile's lingering goes first: with lingering off nothing restarts the user manager, and only then is its placement taken away (a manager that came back without it would run in the host network)
+	lingerok=1
+	if [ "$(profile_mode)" = headless ]; then step "lingering and the user manager of $P_LOGIN" linger_release "$n" "$P_LOGIN" "$P_UIDN" || lingerok=0; fi
 	# the placement goes before the gate: while the gate is still there a user who tries to log in is refused instead of landing half-placed
-	if step "placement drop-in $pl" remove_owned_file "$n" "$pl"; then
+	if [ "$lingerok" = 1 ] && step "placement drop-in $pl" remove_owned_file "$n" "$pl"; then
 		step "systemd reloaded" $SYSTEMCTL daemon-reload
 		# shellcheck disable=SC2086
 		step "login gate lines for $P_LOGIN" pam_remove_for $n $rest
@@ -207,6 +253,7 @@ cmd_remove() {
 	if [ -e "$keyfile" ] && [ -z "$(own_sha "$n" "$keyfile")" ]; then printf '  kept: %s (the administrator'"'"'s key file: left in place; not an error)\n' "$keyfile"; fi
 	for f in $(own_paths "$n"); do
 		[ "$f" = "$PROFDIR/$n.env" ] && continue
+		[ "$lingerok" = 1 ] || [ "$f" != "$pl" ] || continue   # lingering could not be switched off: the placement stays, or a manager that came back would run in the host network
 		if [ "$f" = "$keyfile" ]; then step "$f" remove_key_file "$n" "$f"; else step "$f" remove_owned_file "$n" "$f"; fi
 	done
 	step "bus policy reloaded" dbus_reload
@@ -243,7 +290,7 @@ cmd_remove() {
 }
 # ensure_logged_out N: dies unless the profile's user has no session and no user manager; a check that could not run is a refusal too
 ensure_logged_out() { profile_busy "$1"; case $? in
-	0) die "$P_LOGIN is logged in (or has a running user manager): log them out first. $(busy_hint "$1")";;
+	0) die "$P_LOGIN $(busy_what "$1"): log them out first. $(busy_hint "$1")";;
 	1) ;;
 	*) die "could not tell whether $P_LOGIN is logged in (loginctl or systemctl did not answer), so nothing was removed. Check that systemd-logind is running and try again.";;
 	esac; }
