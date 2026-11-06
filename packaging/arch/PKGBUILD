@@ -2,7 +2,7 @@
 # Build:  make dist && cp nsplit-*.tar.gz packaging/arch/ && (cd packaging/arch && makepkg -f)
 pkgname=nsplit
 pkgver=0.1.0
-pkgrel=14
+pkgrel=15
 pkgdesc='Per-profile Tailscale networking for shared Linux computers: each selected user gets their own network and tailnet'
 arch=(any)
 license=(MIT)
