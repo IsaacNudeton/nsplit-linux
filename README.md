@@ -64,8 +64,17 @@ SSH on the profile's node).
   view, refusal of root and of other accounts, forwarding refused, one reboot, and
   removal. It also found three problems, fixed in this snapshot (below). It did not cover a Tailscale
   sign-in, a connection over the profile's tailnet or a graphical session.
-- **`--ssh tailscale` has not been validated.** It exists in the code; no guest
-  profile used it and nothing connected through it.
+- **`--ssh tailscale` has had one focused guest test on a throwaway lab tailnet, and it
+  does not carry the protections of `--ssh openssh`.** One throwaway profile, the 0.1.0-14
+  package, a self-hosted headscale control server in the guest and a second Tailscale node as
+  the client (no Tailscale account, nothing on the public internet). Sessions ran in the
+  profile's network namespace with the profile's resolver and Tailscale socket and survived a
+  daemon restart, `nsplit stop` and `start`, and a reboot. **But Tailscale, not nsplit, decides
+  which local account a session becomes** (the client logged in as another enrolled user and as
+  the administrator account under a policy that allows non-root users, and as root under one that
+  lists root), the PAM login gate is not in the paths Tailscale SSH uses, and the profile user can
+  switch Tailscale SSH on and off on an owner-managed node. Read [#9](https://github.com/IsaacNudeton/nsplit-linux/issues/9) and
+  [validation](docs/VALIDATION.md#focused---ssh-tailscale-test-2026-11-0506) before using it.
 - The host's own SSH server is not changed by nsplit and is not a way into a profile.
 
 See [validation and limits](docs/VALIDATION.md) for exactly what was and was not shown.
@@ -74,8 +83,9 @@ See [validation and limits](docs/VALIDATION.md) for exactly what was and was not
 
 The focused test found three problems. Each is fixed in this snapshot (0.1.0-14) and its
 issue is closed. The fixes were tested off-host and in a disposable guest on the reviewed
-0.1.0-12 program files with the changed files copied over them; the 0.1.0-14 package built from
-this repository was not itself installed or run in the guest. See
+0.1.0-12 program files with the changed files copied over them. The 0.1.0-14 package built from
+this repository was later installed over 0.1.0-12 in a disposable guest for the Tailscale SSH test,
+but the focused cases of these three issues were not repeated on it. See
 [validation](docs/VALIDATION.md#former-known-issues) for what was and was not shown.
 
 | Issue | What happened | What changed |
@@ -83,6 +93,17 @@ this repository was not itself installed or run in the guest. See
 | [#1](https://github.com/IsaacNudeton/nsplit-linux/issues/1) | A running profile service or user manager could **lose the bind mounts** that give it the profile's `/etc/resolv.conf` and `/run/tailscale` when the host replaced those paths (NetworkManager rewriting `/etc/resolv.conf`; the host's `tailscaled` recreating `/run/tailscale`), and then saw the host's versions. `nsplit status` did not notice. | `nsplit status` reads the running services' mount tables (a lost mount is Degraded, an unreadable one Not checked), and a watcher re-attaches the mounts without restarting or logging out anything. **Limit:** until the repair (about 2 seconds measured, up to 15 minutes if an event is missed) the service sees the host's resolver file and the profile's default Tailscale control path leads to the host's daemon. The exposure is shortened, not removed. |
 | [#2](https://github.com/IsaacNudeton/nsplit-linux/issues/2) | `nsplit remove` left the removed profile's rules in the **live** firewall until the next `nsplit reload`. | The firewall reads an explicit profile list that a removed profile is out of. A damaged list makes `nsplit-fw` fail instead of loading a narrower ruleset. |
 | [#3](https://github.com/IsaacNudeton/nsplit-linux/issues/3) | After following the generated key file's own instruction (adding keys to it), the first `nsplit remove` kept the file, exited 1 and had to be run again. | nsplit no longer creates or owns the root-managed key file; one an administrator makes is kept on removal and is not an error. |
+
+### Open issues found by the Tailscale SSH test
+
+- [#7](https://github.com/IsaacNudeton/nsplit-linux/issues/7): changing the uplinks leaves ufw route rules for the previous uplinks.
+- [#8](https://github.com/IsaacNudeton/nsplit-linux/issues/8): `nsplit remove` leaves `/var/lib/nsplit/scoped-NAME.lock`.
+- [#9](https://github.com/IsaacNudeton/nsplit-linux/issues/9): `--ssh tailscale`: the tailnet policy chooses the local account, and the login gate and
+  `--ssh none` do not apply.
+- [#10](https://github.com/IsaacNudeton/nsplit-linux/issues/10): `nsplit stop --force` reports a failure when a Tailscale SSH session is open (Tailscale's
+  own shutdown behaviour).
+
+All four are open and unfixed in this snapshot.
 
 Enrollment changes login/network configuration and requires an administrator.
 The target account must be logged out, with no running user manager; programs
