@@ -90,7 +90,7 @@ Useful enrollment options are `--name NAME`, `--hostname NAME`, `--root-managed`
 and `--uplinks "IFACE IFACE"` for the first profile.
 Profile names are 1–12 lowercase letters/digits/underscores/hyphens and begin
 with a letter. `nsplit add --help` describes the options. SSH defaults to `none`.
-`--ssh openssh` and `--ssh tailscale` each had one focused guest test (see
+`--ssh openssh` had two focused guest tests and `--ssh tailscale` one (see
 [validation](VALIDATION.md)); try both only on a disposable machine.
 
 **`--ssh tailscale` is an advanced mode governed from outside this machine** (`--ssh openssh` is the
@@ -116,6 +116,19 @@ administrator can switch it on; status reports that the same way.
 Enrollment still requires the Plasma login manager whichever mode you choose.
 Use an explicit generic hostname when you do not want the default machine-derived
 name to appear in the tailnet.
+
+### Reaching the namespace OpenSSH server over the profile's tailnet
+
+With `--ssh openssh` the server listens on port 22 inside the profile's namespace, so once the profile's node is
+signed in it answers on the profile's Tailscale address, from the nodes of that tailnet that its own rules allow (nsplit
+does not manage the tailnet's access rules). It accepts exactly the profile's user, public keys only, no root login,
+no passwords, and no forwarding of ports, agents or client environment. Put the user's public key in their own
+`~/.ssh/authorized_keys` (the user needs nothing from an administrator) or in the root-managed file
+`/etc/nsplit/ssh/PROFILE/authorized_keys`, which nsplit never creates or deletes. Pin the server's host key
+(`/etc/nsplit/ssh/PROFILE/ssh_host_ed25519_key.pub`) in the client's `known_hosts`. Two behaviours to expect:
+OpenSSH 10 resets new connections from an address that has just failed several logins, for a while; and a service
+started inside the profile that listens on all addresses is reachable over the tailnet **and** from the host
+namespace over the profile's private link, by any process of the host.
 
 ## Sign in and verify
 

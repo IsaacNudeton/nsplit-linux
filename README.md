@@ -63,8 +63,15 @@ needs `--accept-tailscale-ssh-risk`).
   One throwaway profile on the reviewed baseline package: public-key login over
   the profile's private link, the session's user, namespace and Tailscale-socket
   view, refusal of root and of other accounts, forwarding refused, one reboot, and
-  removal. It also found three problems, fixed in this snapshot (below). It did not cover a Tailscale
-  sign-in, a connection over the profile's tailnet or a graphical session.
+  removal. It also found three problems, fixed in this snapshot (below). A second focused test
+  (2026-11-06, 0.1.0-16, one profile on a throwaway lab tailnet) connected with ordinary OpenSSH to the
+  profile's **Tailscale address**: login as the profile's user in the profile's namespace, resolver and
+  Tailscale socket, with its user manager placed in the namespace; refusal of root, another enrolled user,
+  the administrator account, an unauthorised key, passwords, forwarding, agent forwarding and client
+  environment variables, each against a control; a user service started from the session answering on the
+  profile's tailnet address; and the same after a daemon restart, `nsplit stop`/`start` and a reboot. See
+  [validation](docs/VALIDATION.md#focused---ssh-openssh-test-over-the-profiles-tailnet-2026-11-06-phase-1-of-13)
+  for what it did not cover. Neither test covered a graphical session.
 - **`--ssh tailscale` is an advanced mode governed from outside this machine. It has had one
   focused guest test on a throwaway lab tailnet, and it does not carry the protections of
   `--ssh openssh`.** Since 0.1.0-16 `nsplit add --ssh tailscale` is refused unless
