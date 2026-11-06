@@ -28,10 +28,11 @@ do not weaken the check.
 ## Build the packaged snapshot
 
 This repository began as a single-commit snapshot of nsplit 0.1.0-13 and is now
-nsplit **0.1.0-14**. The reviewed runtime baseline, 0.1.0-12, is described in
+nsplit **0.1.0-15**. The reviewed runtime baseline, 0.1.0-12, is described in
 [VALIDATION.md](VALIDATION.md); the 0.1.0-13 package differed from it only by the added
-MIT license text, and 0.1.0-14 adds the fixes for issues #1 to #3 (see
-[former known issues](VALIDATION.md#former-known-issues)).
+MIT license text, 0.1.0-14 adds the fixes for issues #1 to #3 (see
+[former known issues](VALIDATION.md#former-known-issues)), and 0.1.0-15 the fixes for
+#7 and #8 (see [validation](VALIDATION.md#defects-7-and-8-fixed-in-010-15)).
 The following creates a source checkout on a new evaluation machine. For an
 existing development checkout, use that checkout rather than creating duplicates.
 
@@ -53,7 +54,7 @@ verification of an arbitrary downloaded archive.
 Install only the package you just built, in the evaluation VM:
 
 ```sh
-sudo pacman -U packaging/arch/nsplit-0.1.0-14-any.pkg.tar.zst
+sudo pacman -U packaging/arch/nsplit-0.1.0-15-any.pkg.tar.zst
 pacman -Q nsplit
 nsplit --version
 ```
@@ -149,7 +150,7 @@ showing the reason. The console path has different placement behavior; see
 | `sudo nsplit start demo` | Start managed networking; selectively restart a daemon whose current socket protections need repair |
 | `sudo nsplit stop demo` | Stop managed networking; refuses a busy/unknown user unless explicitly forced |
 | `nsplit uplinks` | Show configured and discovered physical uplinks |
-| `sudo nsplit uplinks --set "IFACE IFACE"` | Set existing uplinks and reload rules; substitute actual interface names |
+| `sudo nsplit uplinks --set "IFACE IFACE"` | Set existing uplinks and reload rules; substitute actual interface names. The ufw route rules of an uplink that leaves the list are deleted first; if that fails nothing is changed |
 | `sudo nsplit reload` | Reapply managed firewall/forwarding configuration while the firewall is running |
 | `sudo nsplit mounts [check\|repair] [demo]` | Check, or re-attach, the profile's private `/etc/resolv.conf` and `/run/tailscale` in its **running** services (see below) |
 

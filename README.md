@@ -81,8 +81,8 @@ See [validation and limits](docs/VALIDATION.md) for exactly what was and was not
 
 ### Former known issues, fixed in this snapshot
 
-The focused test found three problems. Each is fixed in this snapshot (0.1.0-14) and its
-issue is closed. The fixes were tested off-host and in a disposable guest on the reviewed
+The focused test found three problems. Each is fixed in 0.1.0-14 (this snapshot is 0.1.0-15)
+and its issue is closed. The fixes were tested off-host and in a disposable guest on the reviewed
 0.1.0-12 program files with the changed files copied over them. The 0.1.0-14 package built from
 this repository was later installed over 0.1.0-12 in a disposable guest for the Tailscale SSH test,
 but the focused cases of these three issues were not repeated on it. See
@@ -94,16 +94,20 @@ but the focused cases of these three issues were not repeated on it. See
 | [#2](https://github.com/IsaacNudeton/nsplit-linux/issues/2) | `nsplit remove` left the removed profile's rules in the **live** firewall until the next `nsplit reload`. | The firewall reads an explicit profile list that a removed profile is out of. A damaged list makes `nsplit-fw` fail instead of loading a narrower ruleset. |
 | [#3](https://github.com/IsaacNudeton/nsplit-linux/issues/3) | After following the generated key file's own instruction (adding keys to it), the first `nsplit remove` kept the file, exited 1 and had to be run again. | nsplit no longer creates or owns the root-managed key file; one an administrator makes is kept on removal and is not an error. |
 
-### Open issues found by the Tailscale SSH test
+### Found by the Tailscale SSH test
 
-- [#7](https://github.com/IsaacNudeton/nsplit-linux/issues/7): changing the uplinks leaves ufw route rules for the previous uplinks.
-- [#8](https://github.com/IsaacNudeton/nsplit-linux/issues/8): `nsplit remove` leaves `/var/lib/nsplit/scoped-NAME.lock`.
+Fixed in 0.1.0-15 (tested off-host with controls and mutants, and in a disposable guest with real ufw on the
+installed package; see [validation](docs/VALIDATION.md#defects-7-and-8-fixed-in-010-15)):
+
+- [#7](https://github.com/IsaacNudeton/nsplit-linux/issues/7): changing the uplinks left ufw route rules for the previous uplinks. They are now deleted first.
+- [#8](https://github.com/IsaacNudeton/nsplit-linux/issues/8): `nsplit remove` left `/var/lib/nsplit/scoped-NAME.lock`. It is now removed.
+
+Open and unfixed in this snapshot:
+
 - [#9](https://github.com/IsaacNudeton/nsplit-linux/issues/9): `--ssh tailscale`: the tailnet policy chooses the local account, and the login gate and
   `--ssh none` do not apply.
 - [#10](https://github.com/IsaacNudeton/nsplit-linux/issues/10): `nsplit stop --force` reports a failure when a Tailscale SSH session is open (Tailscale's
   own shutdown behaviour).
-
-All four are open and unfixed in this snapshot.
 
 Enrollment changes login/network configuration and requires an administrator.
 The target account must be logged out, with no running user manager; programs
