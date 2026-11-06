@@ -15,11 +15,19 @@ usage: nsplit add USER [options]
   --dry-run            show every file and command that would change, change nothing
   --yes                do not ask for confirmation
   --name NAME          profile name (default: the username; up to 12 chars of a-z 0-9 _ -, starting with a letter)
-  --ssh MODE           none (default) | tailscale (Tailscale SSH on their node) | openssh (a separate OpenSSH inside their namespace)
+  --ssh MODE           none (default) | openssh | tailscale
+                         openssh    a separate OpenSSH server inside their namespace that accepts exactly this user (the recommended remote shell)
+                         tailscale  ADVANCED: Tailscale's own built-in SSH server on their node. It needs --accept-tailscale-ssh-risk (see below).
+  --accept-tailscale-ssh-risk
+                       required with --ssh tailscale, and --yes does not stand in for it. It says you accept that the SSH rules of the user's own tailnet policy decide which local
+                       account a Tailscale SSH login becomes: they can name any account on this machine (other nsplit users, the administrator, root), nsplit can neither read nor limit
+                       them, and nsplit's login gate does not cover these sessions. It is refused with any other --ssh mode.
   --hostname NAME      their node's name on their tailnet (default: <this host>-<profile>)
   --uplinks "A B"      network interfaces their traffic may leave through (first profile only; default: every physical interface found)
   --root-managed       an administrator manages the node: the user may not run `tailscale` or `nsplit login` themselves (the default is owner-managed: the user may,
                        through ONE sudo rule written for them and this profile that allows exactly two fixed nsplit operations and nothing else; it is removed with the profile)
+  With --ssh none or openssh, Tailscale's built-in SSH server is only switched OFF when the node is signed in. On an owner-managed profile the user is the node's Tailscale operator
+  and can switch it on later (tailscale set --ssh); `nsplit status` reads the node's real setting and reports a node that has it on although the profile says otherwise.
 EOF
 }
 
@@ -51,6 +59,8 @@ add_preflight() {
 	[ -x /usr/bin/tailscaled ] && [ -x "$TS_BIN" ] || problem "Tailscale is not installed (tailscale and tailscaled are needed in /usr/bin)"
 	[ -x /usr/bin/dnsmasq ] || problem "dnsmasq is not installed (it is the profile's private resolver)"
 	[ "$SSH" != openssh ] || { [ -x /usr/bin/sshd ] && command -v ssh-keygen >/dev/null || problem "--ssh openssh needs OpenSSH (sshd, ssh-keygen)"; }
+	[ "$SSH" != tailscale ] || [ "$ACK_TS" = 1 ] || problem "--ssh tailscale needs --accept-tailscale-ssh-risk (--yes does not stand in for it): with Tailscale's built-in SSH server the SSH rules of $LOGIN's tailnet policy choose the local account a login becomes (any account on this machine, including the administrator and root), nsplit cannot read or limit them, and its login gate does not cover these sessions. The recommended remote shell is --ssh openssh."
+	[ "$ACK_TS" != 1 ] || [ "$SSH" = tailscale ] || problem "--accept-tailscale-ssh-risk only goes with --ssh tailscale (this enrolment is --ssh $SSH)"
 	[ -r "$PAMVENDOR/plasmalogin" ] || problem "this system's graphical login is not the supported one (no $PAMVENDOR/plasmalogin: only the Plasma login manager is supported in this release)"
 	[ -r "$PAMDIR/login" ] || problem "no $PAMDIR/login (the console login stack)"
 	if [ -r "$PAMDIR/plasmalogin" ] && ! grep -q '# nsplit:' "$PAMDIR/plasmalogin" && ! cmp -s "$PAMDIR/plasmalogin" "$PAMVENDOR/plasmalogin"; then
@@ -170,6 +180,24 @@ sudoers_text() { local who=$LOGIN; case $LOGIN in *[!a-z0-9_-]*|[!a-z_]*) who="#
 # They are fixed command lines: check that the profile's Tailscale daemon is inside the profile's namespace, and switch on the profile's private DNS. Nothing else.
 $who ALL=(root) NOPASSWD: $SCOPED $NAME verify, $SCOPED $NAME dns
 EOF
+}
+
+# ssh_notice: the boundary of the chosen SSH mode, printed in the preview, before applying, and at the end. Nothing here claims more than was measured:
+# on a root-managed profile it does not say the built-in server cannot be switched on (that was not tested), only that nsplit status reads it.
+ssh_notice() {
+	case $SSH in
+	tailscale)
+		say "  NOTICE (--ssh tailscale: advanced, governed from outside this machine): this turns on Tailscale's built-in SSH server on $LOGIN's node. Which local account a login becomes is decided by the"
+		say "  SSH rules of the tailnet policy that $LOGIN's Tailscale account controls, not by nsplit: they can name any account on this machine (other nsplit users, the administrator, root)."
+		say "  nsplit can neither read nor limit that policy, and its login gate does not apply to these sessions. Use it only if whoever controls that tailnet may have a shell here as any account its policy names."
+		say "  The recommended remote shell is --ssh openssh: a separate OpenSSH inside the namespace that accepts exactly $LOGIN.";;
+	*)
+		if [ "$MANAGED" = owner ]; then
+			say "  NOTE: Tailscale's built-in SSH server is switched OFF when the node is signed in, but $LOGIN is the node's Tailscale operator (owner-managed) and can switch it on later (tailscale set --ssh). nsplit status reads the node's real setting and reports it if it is on."
+		else
+			say "  NOTE: Tailscale's built-in SSH server is switched OFF when the node is signed in. nsplit status reads the node's real setting and reports it if it is on."
+		fi;;
+	esac
 }
 
 # ---- PAM login gate ---------------------------------------------------------------------------------------------------
@@ -401,12 +429,13 @@ apply_all() {
 
 cmd_add() {
 	local yes=0 ssh_arg="" ans why
-	DRY_REQ=0; BUSY_NOTE=""; MANAGED=owner; MARK_MADE=0; LOGIN=""; NAME=""; SSH=none; HOSTNAME_ARG=""; UPLINKS_ARG=""
+	DRY_REQ=0; BUSY_NOTE=""; MANAGED=owner; MARK_MADE=0; LOGIN=""; NAME=""; SSH=none; HOSTNAME_ARG=""; UPLINKS_ARG=""; ACK_TS=0
 	while [ $# -gt 0 ]; do case $1 in
 		-h|--help) usage_add; return 0;;
 		--dry-run) DRY_REQ=1; shift;; --yes|-y) yes=1; shift;;
 		--name) NAME=${2:?--name needs a value}; shift 2;;
 		--ssh) ssh_arg=${2:?--ssh needs none|tailscale|openssh}; shift 2;;
+		--accept-tailscale-ssh-risk) ACK_TS=1; shift;;
 		--hostname) HOSTNAME_ARG=${2:?--hostname needs a value}; shift 2;;
 		--uplinks) UPLINKS_ARG=${2:?--uplinks needs a list}; shift 2;;
 		--root-managed) MANAGED=root; shift;;
@@ -424,6 +453,7 @@ cmd_add() {
 	[ -z "$BUSY_NOTE" ] || info "NOTE: a real run would be refused right now: $BUSY_NOTE"
 	say "  uid $UIDN   namespace $NS   link $HOST_IP <-> $NS_IP   node name $TS_HOSTNAME   uplinks: $UPLINKS_USED   ssh: $SSH   management: $MANAGED"
 	say "  LIMIT: only logins and user managers are checked. Programs of $LOGIN outside any session (cron/at jobs, system services running as uid $UIDN, sudo -u or su from another account) are not detected: they lose their host network when the guard loads and are not placed in $NS."
+	ssh_notice
 	say; say "Changes:"
 	DRY=1; apply_all; DRY=0
 	if [ "$DRY_REQ" = 1 ]; then say; [ -z "$BUSY_NOTE" ] || say "NOTE: a real run would be refused right now: $BUSY_NOTE"; say "Dry run: nothing was changed."; return 0; fi
@@ -438,6 +468,7 @@ cmd_add() {
 	if ! add_checks; then rollback_all; APPLYING=0; die "a check failed; everything this command did was undone"; fi
 	APPLYING=0
 	say; say "Done. $LOGIN has a network of their own (not yet signed in to Tailscale)."
+	ssh_notice
 	say "Next:  nsplit login $NAME     (the user opens the sign-in link and approves their own Tailscale account)"
 	say "       Their next login uses the new network."
 	say "       If a login of $LOGIN is ever refused, a console login prints the reason; the graphical login screen just resets, and the reason is in the log (journalctl -t nsplit-pam-gate) and in: nsplit status"

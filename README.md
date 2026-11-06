@@ -55,8 +55,9 @@ includes a NetworkManager dispatcher hook and optional ufw integration.
 ## Remote shell options and former known issues
 
 Enrollment accepts `--ssh none` (the default), `--ssh openssh` (a separate
-OpenSSH server inside the profile's namespace) and `--ssh tailscale` (Tailscale
-SSH on the profile's node).
+OpenSSH server inside the profile's namespace; the recommended remote shell) and
+`--ssh tailscale` (Tailscale's own SSH server on the profile's node; an advanced mode that
+needs `--accept-tailscale-ssh-risk`).
 
 - **`--ssh openssh` has had one focused guest test, not an acceptance program.**
   One throwaway profile on the reviewed baseline package: public-key login over
@@ -64,8 +65,12 @@ SSH on the profile's node).
   view, refusal of root and of other accounts, forwarding refused, one reboot, and
   removal. It also found three problems, fixed in this snapshot (below). It did not cover a Tailscale
   sign-in, a connection over the profile's tailnet or a graphical session.
-- **`--ssh tailscale` has had one focused guest test on a throwaway lab tailnet, and it
-  does not carry the protections of `--ssh openssh`.** One throwaway profile, the 0.1.0-14
+- **`--ssh tailscale` is an advanced mode governed from outside this machine. It has had one
+  focused guest test on a throwaway lab tailnet, and it does not carry the protections of
+  `--ssh openssh`.** Since 0.1.0-16 `nsplit add --ssh tailscale` is refused unless
+  `--accept-tailscale-ssh-risk` is given (`--yes` does not stand in for it); the preview, the final
+  output and `nsplit status` print the boundary below, and `nsplit status` reads the node's real
+  built-in SSH setting. The test used one throwaway profile, the 0.1.0-14
   package, a self-hosted headscale control server in the guest and a second Tailscale node as
   the client (no Tailscale account, nothing on the public internet). Sessions ran in the
   profile's network namespace with the profile's resolver and Tailscale socket and survived a
@@ -73,7 +78,9 @@ SSH on the profile's node).
   which local account a session becomes** (the client logged in as another enrolled user and as
   the administrator account under a policy that allows non-root users, and as root under one that
   lists root), the PAM login gate is not in the paths Tailscale SSH uses, and the profile user can
-  switch Tailscale SSH on and off on an owner-managed node. Read [#9](https://github.com/IsaacNudeton/nsplit-linux/issues/9) and
+  switch Tailscale SSH on and off on an owner-managed node (on a root-managed profile that user was
+  refused in the 0.1.0-16 test). nsplit can neither read nor limit the tailnet policy, so this is a
+  boundary to accept, not one nsplit enforces. Read [#9](https://github.com/IsaacNudeton/nsplit-linux/issues/9) and
   [validation](docs/VALIDATION.md#focused---ssh-tailscale-test-2026-11-0506) before using it.
 - The host's own SSH server is not changed by nsplit and is not a way into a profile.
 
@@ -103,17 +110,16 @@ installed package; see [validation](docs/VALIDATION.md#defects-7-and-8-fixed-in-
 - [#8](https://github.com/IsaacNudeton/nsplit-linux/issues/8): `nsplit remove` left `/var/lib/nsplit/scoped-NAME.lock`. It is now removed.
 
 Fixed in 0.1.0-16 (tested off-host with controls and mutants, and in a disposable guest on the installed package; see
-[validation](docs/VALIDATION.md#defect-10-fixed-in-010-16)):
+[validation](docs/VALIDATION.md#defect-10-fixed-in-010-16) and [#9](docs/VALIDATION.md#issue-9-acknowledgement-and-status-for---ssh-tailscale-0110-16)):
 
 - [#10](https://github.com/IsaacNudeton/nsplit-linux/issues/10): `nsplit stop --force` reported a failure when a Tailscale SSH session was open, because
   Tailscale's own shutdown (10 s stop time-out, then SIGKILL) leaves the daemon unit `failed`. nsplit now checks that nothing of the
   profile is left, clears that one state, says the stop was not graceful and exits 0. The refusal for a user who is still logged in
   now names `loginctl terminate-user USER` as the administrator's way out; nsplit never runs it.
-
-Open and unfixed in this snapshot:
-
-- [#9](https://github.com/IsaacNudeton/nsplit-linux/issues/9): `--ssh tailscale`: the tailnet policy chooses the local account, and the login gate and
-  `--ssh none` do not apply.
+- [#9](https://github.com/IsaacNudeton/nsplit-linux/issues/9): `--ssh tailscale`: the tailnet policy chooses the local account, and the login gate and `--ssh none` do not apply.
+  What changed is that the mode now needs an explicit acknowledgement, says so in the preview, the final output and
+  `nsplit status`, and `nsplit status` reads the node's real built-in SSH setting (Degraded when it is on although the
+  profile says `none` or `openssh`). **The limitation itself remains:** nsplit cannot read or limit the tailnet policy.
 
 Enrollment changes login/network configuration and requires an administrator.
 The target account must be logged out, with no running user manager; programs

@@ -31,9 +31,15 @@ session that could leave that namespace and read root-only files. The PAM login 
 `login` with PAM service `remote`): with the placement removed, the gate script refused but
 a Tailscale SSH login was accepted and the user manager started in the host namespace. The
 profile user, as the node's operator, can switch Tailscale SSH on and off, so `--ssh none` does
-not prevent it on an owner-managed profile. Use `--ssh tailscale` only where the person who
-controls the profile's Tailscale account may be given a shell on this machine as any account
-their policy names. See [validation](docs/VALIDATION.md).
+not prevent it on an owner-managed profile (on a root-managed profile the user was refused in one
+test). Use `--ssh tailscale` only where the person who controls the profile's Tailscale account may be
+given a shell on this machine as any account their policy names. Since 0.1.0-16 the mode is an
+advanced, acknowledged one: `nsplit add --ssh tailscale` needs `--accept-tailscale-ssh-risk`,
+the preview, the final output and `nsplit status` state the boundary, and `nsplit status` reads
+the node's real setting and reports it as Degraded when it is on although the profile says
+`none` or `openssh`. nsplit still cannot read or limit the tailnet policy, and a PAM-only fix would
+not be complete either (Tailscale's own launcher has paths that do not use PAM). See
+[validation](docs/VALIDATION.md).
 
 **A running profile service can lose its view of the profile, for a short time.** The profile
 services and user manager get the profile's resolver file and Tailscale socket directory

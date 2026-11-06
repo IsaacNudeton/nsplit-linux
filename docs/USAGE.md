@@ -86,20 +86,33 @@ placement, login-gate configuration, D-Bus policy and, for owner-managed profile
 a scoped sudo rule. It is not just a change to a single user's dotfiles.
 
 Useful enrollment options are `--name NAME`, `--hostname NAME`, `--root-managed`,
-`--ssh none|tailscale|openssh`, and `--uplinks "IFACE IFACE"` for the first profile.
+`--ssh none|openssh|tailscale`, `--accept-tailscale-ssh-risk` (required by `--ssh tailscale`, refused with the other modes)
+and `--uplinks "IFACE IFACE"` for the first profile.
 Profile names are 1–12 lowercase letters/digits/underscores/hyphens and begin
 with a letter. `nsplit add --help` describes the options. SSH defaults to `none`.
 `--ssh openssh` and `--ssh tailscale` each had one focused guest test (see
 [validation](VALIDATION.md)); try both only on a disposable machine.
 
-**Before using `--ssh tailscale`:** the profile's node is signed in with the user's own Tailscale
-account, so that account's SSH policy, not nsplit, decides which local accounts a session can
-become on this machine. In the test, a rule allowing non-root users reached another enrolled
-user and the administrator account, and a rule listing `root` gave a root session that can leave
-the profile namespace. `--ssh openssh` pins the server to the profile's own user instead. If you
-use `--ssh tailscale`, have the `users` list of that account's SSH rule name only the profile's
-own login (tested to restrict it), and accept that the profile user can switch Tailscale SSH on
-and off on their node and that nsplit's login gate is not part of these sessions.
+**`--ssh tailscale` is an advanced mode governed from outside this machine** (`--ssh openssh` is the
+recommended remote shell). The profile's node is signed in with the user's own Tailscale account, so
+that account's SSH policy, not nsplit, decides which local accounts a session can become on this
+machine. In the test, a rule allowing non-root users reached another enrolled user and the
+administrator account, and a rule listing `root` gave a root session that can leave the profile
+namespace. `--ssh openssh` pins the server to the profile's own user instead. Since 0.1.0-16
+`nsplit add --ssh tailscale` is refused without `--accept-tailscale-ssh-risk` (`--yes` does not stand
+in for it): by giving it you accept that the policy may authorize other local accounts or root, that
+nsplit can neither read nor limit it, and that nsplit's login gate is not part of these sessions. The
+preview, the final output of `nsplit add`, `nsplit login` and `nsplit status` repeat that. If you use
+the mode, have the `users` list of that account's SSH rule name only the profile's own login (tested
+to restrict it); that is advice about a policy nsplit does not control, not something it enforces.
+
+With `--ssh none` or `--ssh openssh` Tailscale's built-in SSH server is only switched **off** when
+the node is signed in. On an owner-managed profile the user is the node's Tailscale operator and can
+switch it on later (`tailscale set --ssh`), so `nsplit status` reads the node's real setting and shows
+the profile as Degraded, with the command that turns it off, when it is on although the profile says
+`none` or `openssh`; a setting it cannot read is `Not checked`. On a root-managed profile the profile's
+user was refused when they tried to switch it on (one profile, Tailscale 1.104.2, measured), and an
+administrator can switch it on; status reports that the same way.
 Enrollment still requires the Plasma login manager whichever mode you choose.
 Use an explicit generic hostname when you do not want the default machine-derived
 name to appear in the tailnet.
@@ -128,7 +141,7 @@ nsplit status -v demo
 sudo nsplit status -v demo
 ```
 
-Status is read-only. It also reads the mount tables of the running services (see [Lost profile mounts](#lost-profile-mounts)). An ordinary user can see `UNKNOWN` or `Not checked` because
+Status is read-only. It also reads the mount tables of the running services (see [Lost profile mounts](#lost-profile-mounts)) and the node's real built-in Tailscale SSH setting (see above). An ordinary user can see `UNKNOWN` or `Not checked` because
 some observations require administrator rights. This does not itself mean that
 the profile is broken, and it does not justify granting broader sudo access.
 
