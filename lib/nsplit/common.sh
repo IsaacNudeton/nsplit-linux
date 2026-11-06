@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# nsplit common library: paths, output, validation, discovery, profile files, owned-file records, undo stack.
+# nsplit common library: paths, output, validation, discovery, profile files, owned-file records, undo stack, temporary files.
 # Sourced by bin/nsplit. Every path can be redirected with NSPLIT_* variables so the tool can be exercised against a scratch directory
 # and fake system commands without touching the machine (the defaults are the real locations).
 
@@ -37,6 +37,8 @@ SCOPED=$LIB/nsplit-scoped
 DRY=0
 UNDO=()
 OWNER=_shared
+APPLYING=0                 # 1 while `nsplit add` is applying changes: a failure or an interrupt then undoes them (nsplit_atexit)
+NSPLIT_MAINPID=$$          # the main shell; a subshell that registers a temporary file cleans up its own
 
 # ---------------------------------------------------------------- output
 say()  { printf '%s\n' "$*"; }
@@ -59,6 +61,51 @@ user_uid() { id -u "$1" 2>/dev/null; }
 unit_active() { [ "$($SYSTEMCTL is-active "$1" 2>/dev/null)" = active ]; }
 unit_state() { local o; o=$($SYSTEMCTL is-active "$1" 2>/dev/null); case $o in active|inactive|failed|activating|deactivating|reloading) printf %s "$o";; *) printf unknown;; esac; }
 
+# ---------------------------------------------------------------- temporary files
+# Every temporary file nsplit makes (the undo backups, the generated login files, the sudoers check copy, the staging file beside a target) is registered by its exact path the moment it exists,
+# and this code removes nothing else: no glob, no directory listing, and a registered path is removed only while it is still the regular file (device:inode) that was registered.
+# tmp_new VAR makes a private file with mktemp and puts its path in VAR: call it as a command, never inside $(...), where the path would die with the substitution's subshell.
+# tmp_adopt PATH registers a file nsplit has just created at an exact path. tmp_drop PATH removes a registered file now (rollback helpers do). tmp_sweep removes whatever this process still has registered and
+# is safe to repeat. The EXIT handler runs it after any undo has used the files; a subshell that registers a file cleans up its own entries when it ends (traps do not survive into subshells).
+TMPREG_PATH=(); TMPREG_ID=(); TMPREG_PID=()
+tmp_id() { stat -c '%d:%i' -- "$1" 2>/dev/null; }
+tmp_adopt() {
+	local p=$1 id i j
+	case $p in ''|*$'\n'*) return 1;; esac
+	[ -f "$p" ] && [ ! -L "$p" ] && id=$(tmp_id "$p") || return 1
+	i=${#TMPREG_PATH[@]}   # a path registered before (a staging name used again) keeps its single entry
+	for j in "${!TMPREG_PATH[@]}"; do [ "${TMPREG_PATH[$j]}" = "$p" ] && { i=$j; break; }; done
+	TMPREG_PATH[i]=$p; TMPREG_ID[i]=$id; TMPREG_PID[i]=$BASHPID
+	[ "$BASHPID" = "$NSPLIT_MAINPID" ] || trap tmp_sweep EXIT
+	return 0
+}
+tmp_new() {
+	local p; p=$(mktemp "${TMPDIR:-/tmp}/nsplit.XXXXXX") || die "cannot create a temporary file in ${TMPDIR:-/tmp}"
+	case $p in /*) ;; *) p=$PWD/$p;; esac
+	tmp_adopt "$p" || { rm -f -- "$p"; die "cannot register the temporary file $p"; }
+	printf -v "$1" %s "$p"
+}
+tmp_rm() { # tmp_rm INDEX: remove that registered file if it is still the one registered, then forget it; a file that is gone is nothing to report
+	local i=$1 p=${TMPREG_PATH[$1]}
+	[ -n "$p" ] || return 0
+	if [ -e "$p" ] || [ -L "$p" ]; then
+		if [ -f "$p" ] && [ ! -L "$p" ] && [ "$(tmp_id "$p")" = "${TMPREG_ID[$i]}" ]; then rm -f -- "$p"
+		else warn "not removing $p: it is no longer the temporary file nsplit made"; fi
+	fi
+	TMPREG_PATH[i]=""
+}
+tmp_drop() { local i; for i in "${!TMPREG_PATH[@]}"; do [ "${TMPREG_PATH[$i]}" = "$1" ] && tmp_rm "$i"; done; return 0; }
+tmp_sweep() { local i; for i in "${!TMPREG_PATH[@]}"; do [ "${TMPREG_PID[$i]}" = "$BASHPID" ] && tmp_rm "$i"; done; return 0; }
+# nsplit_atexit: the one EXIT handler of the command (bin/nsplit installs it, with traps that turn HUP, INT and TERM into a failing exit: a signal alone leaves $? at 0 in an EXIT trap,
+# which used to skip the undo). The undo of an interrupted `add` comes first because it still needs the backup files; a second signal must not cut the undo or the cleanup short.
+nsplit_atexit() {
+	local rc=$?
+	trap '' HUP INT TERM
+	if [ "$rc" -ne 0 ] && [ "${APPLYING:-0}" = 1 ]; then APPLYING=0; rollback_all; fi
+	tmp_sweep
+	exit "$rc"
+}
+
 # ---------------------------------------------------------------- dry run / actions
 # run CMD...: execute, or only print in a preview (--dry-run)
 run() { if [ "$DRY" = 1 ]; then printf '    would run: %s\n' "$*"; return 0; fi; "$@"; }
@@ -69,8 +116,8 @@ rollback_all() { local i n=${#UNDO[@]}; [ "$n" -gt 0 ] || return 0; warn "undoin
 
 # ---------------------------------------------------------------- ownership records
 own_file() { printf '%s/%s.list' "$OWNDIR" "$1"; }
-own_record() { local o=$1 p=$2 f; f=$(own_file "$o"); mkdir -p "$OWNDIR"; touch "$f"; grep -v "  $p\$" "$f" > "$f.new" || true; printf '%s  %s\n' "$(sha "$p")" "$p" >> "$f.new"; mv -f "$f.new" "$f"; }
-own_forget() { local o=$1 p=$2 f; f=$(own_file "$o"); [ -f "$f" ] || return 0; grep -v "  $p\$" "$f" > "$f.new" || true; mv -f "$f.new" "$f"
+own_record() { local o=$1 p=$2 f; f=$(own_file "$o"); mkdir -p "$OWNDIR"; touch "$f"; grep -v "  $p\$" "$f" > "$f.new" || true; tmp_adopt "$f.new"; printf '%s  %s\n' "$(sha "$p")" "$p" >> "$f.new"; mv -f "$f.new" "$f"; }
+own_forget() { local o=$1 p=$2 f; f=$(own_file "$o"); [ -f "$f" ] || return 0; grep -v "  $p\$" "$f" > "$f.new" || true; tmp_adopt "$f.new"; mv -f "$f.new" "$f"
 	[ -s "$f" ] || { rm -f "$f"; rmdir --ignore-fail-on-non-empty "$OWNDIR" 2>/dev/null; }; return 0; }
 own_sha() { local f; f=$(own_file "$1"); [ -f "$f" ] && awk -v p="$2" '{s=$1; $1=""; sub(/^ +/,""); if ($0==p) print s}' "$f" | tail -1; }
 own_paths() { local f; f=$(own_file "$1"); [ -f "$f" ] && awk '{$1=""; sub(/^ +/,""); print}' "$f"; }
@@ -80,26 +127,26 @@ own_paths() { local f; f=$(own_file "$1"); [ -f "$f" ] && awk '{$1=""; sub(/^ +/
 # Feed it with `put PATH MODE < <(generator)`, NEVER `generator | put ...`: the right side of a pipe runs in a subshell and its undo registration would be lost.
 put() {
 	local path=$1 mode=${2:-644} new prev had=0 cur want
-	new=$(mktemp "${TMPDIR:-/tmp}/nsplit.XXXXXX"); cat > "$new"
+	tmp_new new; cat > "$new"
 	if [ -e "$path" ]; then
 		had=1; cur=$(sha "$path"); want=$(sha "$new")
 		if [ "$cur" = "$want" ]; then
-			if [ "$DRY" = 1 ]; then printf '    unchanged: %s\n' "$path"; rm -f "$new"; return 0; fi
-			own_record "$OWNER" "$path"; rm -f "$new"; return 0
+			if [ "$DRY" = 1 ]; then printf '    unchanged: %s\n' "$path"; tmp_drop "$new"; return 0; fi
+			own_record "$OWNER" "$path"; tmp_drop "$new"; return 0
 		fi
-		[ "$(own_sha "$OWNER" "$path")" = "$cur" ] || { rm -f "$new"; die "refusing to overwrite $path: nsplit did not create it, or it was changed since"; }
+		[ "$(own_sha "$OWNER" "$path")" = "$cur" ] || { tmp_drop "$new"; die "refusing to overwrite $path: nsplit did not create it, or it was changed since"; }
 	fi
-	if [ "$DRY" = 1 ]; then printf '    would %s: %s (mode %s)\n' "$([ $had = 1 ] && echo update || echo create)" "$path" "$mode"; rm -f "$new"; return 0; fi
+	if [ "$DRY" = 1 ]; then printf '    would %s: %s (mode %s)\n' "$([ $had = 1 ] && echo update || echo create)" "$path" "$mode"; tmp_drop "$new"; return 0; fi
 	mkdir -p "$(dirname "$path")"
-	if [ $had = 1 ]; then prev=$(mktemp "${TMPDIR:-/tmp}/nsplit.XXXXXX"); cp -p "$path" "$prev"; fi
-	install -m "$mode" "$new" "$path.nsplit-new" && mv -f "$path.nsplit-new" "$path"; rm -f "$new"
+	if [ $had = 1 ]; then tmp_new prev; cp -p "$path" "$prev"; fi   # the rollback copy: dropped by put_restore, or swept at exit when nothing needed to be undone
+	install -m "$mode" "$new" "$path.nsplit-new" && { tmp_adopt "$path.nsplit-new"; mv -f "$path.nsplit-new" "$path"; }; tmp_drop "$new"
 	own_record "$OWNER" "$path"
 	if [ $had = 1 ]; then undo_push put_restore "$OWNER" "$path" "$prev"; else undo_push put_remove "$OWNER" "$path"; fi
 }
 # rmdir_ours DIR: remove DIR when it is empty, except a directory that belongs to another package and exists without nsplit (sudo's)
 rmdir_ours() { [ "$1" = "$SUDOERSDIR" ] || rmdir --ignore-fail-on-non-empty "$1" 2>/dev/null; return 0; }
 put_remove() { rm -f "$2"; own_forget "$1" "$2"; rmdir_ours "$(dirname "$2")"; true; }
-put_restore() { cat "$3" > "$2" && own_record "$1" "$2"; rm -f "$3"; }
+put_restore() { cat "$3" > "$2" && own_record "$1" "$2"; tmp_drop "$3"; }
 
 # ---------------------------------------------------------------- global configuration (/etc/nsplit/nsplit.conf)
 conf_get() { [ -r "$CONF" ] || return 1; ( . "$CONF" 2>/dev/null; eval "printf %s \"\${$1-}\"" ); }
