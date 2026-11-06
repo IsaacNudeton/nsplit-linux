@@ -27,7 +27,8 @@ and adds one command, one helper and three systemd units for the mount watcher.
 **0.1.0-15 changes two files relative to -14** (`cmd-ops.sh` and `nsplit-ufw`; comparing the two
 packages showed 31 installed files, exactly those two different) to fix #7 and #8, see
 [below](#defects-7-and-8-fixed-in-010-15).
-**0.1.0-16 changes `cmd-ops.sh` relative to -15** to fix #10, see [below](#defect-10-fixed-in-010-16).
+**0.1.0-16 changes four files relative to -15** (`cmd-ops.sh`, `cmd-add.sh`, `cmd-login.sh` and `cmd-status.sh`; comparing the two packages showed 31 installed files, exactly those four different): `cmd-ops.sh` for #10, see
+[below](#defect-10-fixed-in-010-16), and the other three for #9, see [below](#issue-9-acknowledgement-and-status-for---ssh-tailscale-0110-16).
 The guest tests of the fixes ran on the 0.1.0-12 baseline package, with the changed files
 copied over it (originals restored and checked afterwards). The -13 package was not installed.
 **The -14 package built from this repository (main 49ed71b) was installed over 0.1.0-12 in
@@ -144,7 +145,7 @@ and `nsplit mounts repair` re-attached them without restarting anything.
   a manager could reach was not measured.
 - **`--ssh none` is not enforced for an owner-managed profile.** The profile user, as the
   node's operator, ran `tailscale set --ssh=false` and `--ssh=true` on their node and the
-  client was refused and then accepted. `--root-managed` was not tested.
+  client was refused and then accepted. `--root-managed` was not tested then (it was in 0.1.0-16: [below](#issue-9-acknowledgement-and-status-for---ssh-tailscale-0110-16)).
 - **Two behaviours of Tailscale 1.104.2 itself ([#10](https://github.com/IsaacNudeton/nsplit-linux/issues/10)),** reproduced on a bare
   `tailscaled --ssh` node with nothing of nsplit: a client killed abruptly leaves the remote
   interactive login shell running (still there after 90 s, the user manager stays up), and
@@ -230,6 +231,46 @@ daemon, and `start --all` brought everything back. *Not tested:* other Tailscale
 survives SIGKILL or a namespace that cannot be removed on the real system (those cases were
 injected off-host only); `nsplit remove` with a killed daemon on the real system (off-host only); a
 graphical session.
+
+### Issue #9: acknowledgement and status for `--ssh tailscale` (0.1.0-16)
+
+**[#9](https://github.com/IsaacNudeton/nsplit-linux/issues/9) — the tailnet policy chooses the local account.** The limitation cannot be removed by nsplit (it cannot read or
+limit the policy, and its PAM gate is not in every path Tailscale's own SSH server launches a session by), so
+0.1.0-16 changes what is *claimed and checked*, not what Tailscale SSH does. *Change:* `nsplit add --ssh
+tailscale` is refused (in a dry run too, listed with any other problem) unless `--accept-tailscale-ssh-risk` is
+given; `--yes` does not stand in for it, and the flag is refused with any other `--ssh` mode. The preview, the
+final output of `nsplit add` and `nsplit login` state that the tailnet policy chooses the local account (any
+account on the machine, the administrator and root included), that nsplit can neither read nor limit it and that its
+login gate does not apply to these sessions, and name `--ssh openssh` as the recommended remote shell. For `--ssh
+none` and `openssh` they say the built-in server is only switched off when the node is signed in (and, on an
+owner-managed profile, that its user can switch it on later); for a root-managed profile they claim nothing
+about that. `nsplit status` reads `RunSSH` from the node's real preferences: on although the record says `none`
+or `openssh` is **Degraded** (exit 2) with the command that turns it off; unreadable, or a preferences record
+without the field, is `Not checked` (a missing value is never read as off); a profile enrolled with
+`--ssh tailscale` carries the boundary as a warning in its Ready line and as a `WARN` line in `status -v`.
+*Tested:* off-host with a fake `tailscale` that records the setting, 38 checks (the refusals and their
+wording, the dry run, the flag with other modes, the notices in the preview and at the end, the note for
+owner- and root-managed profiles, status for none, openssh and root-managed profiles with the setting switched on and off
+through `nsplit ts`, unreadable and missing preferences, a node not signed in yet, the `--ssh tailscale`
+profile in all three states); the same checks against the unfixed code fail 30 of 38, and ten mutants that each remove one safeguard are each
+rejected by named checks. One older check of the 0.1.0-12 suite that enrols with `--ssh tailscale` now needs the flag;
+with that one line changed the suite passes unchanged otherwise. In the disposable guest on the real 0.1.0-16 package
+with three throwaway profiles on the lab tailnet (`--ssh tailscale` acknowledged, `--ssh openssh`, and `--ssh none`
+root-managed): the refusals, the dry runs and the notices printed as designed; the nodes signed in with the flags
+`nsplit login` passes (plus the lab server) had the built-in SSH on, off and off in their real preferences; status
+said Ready for all three, with the warning for the first. **Owner-managed `--ssh openssh`:** its user ran
+`tailscale set --ssh=true` on their node (exit 0), `nsplit status` then said Degraded with the message and the
+command, the lab peer could log in through Tailscale SSH as that user **and as the administrator account**, and after
+the user switched it off status said Ready. **Root-managed:** the profile's user was refused when they ran
+`tailscale set --ssh=true` ("Access denied") and when they ran the whole `tailscale up` command line that
+`nsplit login` uses with `--ssh=true` ("Access denied: prefs write access denied"; the same line run by root was
+accepted); another local user could not use that profile's socket at all; an administrator (`nsplit ts`) could switch
+it on, and status then said Degraded. The `--ssh tailscale` profile's setting switched off behind the record's back was
+shown as a `WARN` line. (The first guest run of the `up` case ran the command without the lab's `--login-server` flag
+and got Tailscale's "mention all non-default flags" error, which says nothing about permission; the case was
+rerun with the full line.) *Not tested:* Tailscale versions other than 1.104.2; a root-managed profile enrolled with
+`--ssh tailscale`; an operator changed after enrolment; Tailscale's `check` mode and tags; `nsplit login` on a node
+that is already signed in with the built-in SSH switched on (login does not re-apply the setting).
 
 ## Former known issues
 
@@ -338,7 +379,7 @@ does not configure this.
 - The fixes of the three former issues were tested as changed files over the 0.1.0-12 baseline
   package; the 0.1.0-14 package built from this repository was exercised in the Tailscale SSH test, the
   0.1.0-15 package, upgraded in place from -14, for the fixes of #7 and #8 only, and the 0.1.0-16 package,
-  upgraded in place from -15, for the fix of #10 only. This documentation is
+  upgraded in place from -15, for the changes of #9 and #10 only. This documentation is
   not a claim that the package is ready for any particular deployment.
 - A fresh `nsplit add` on the final -12 guest package, a graphical desktop run on
   that package, or an installation on the real workstation was not demonstrated
