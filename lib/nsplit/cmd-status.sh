@@ -10,6 +10,8 @@ usage: nsplit status [-v] [PROFILE]
   The mount tables of the running services (daemon, namespace sshd, user manager) are read too: a lost private /etc/resolv.conf or /run/tailscale, or a running service whose unit no longer declares it, is Degraded; one that cannot be read (needs root) is Not checked.
   The node's real built-in Tailscale SSH setting is read and compared with what the profile record says: ON although the record says none or openssh is a security problem (Degraded: the tailnet
   policy can then authorize logins as other local accounts or root, which nsplit's login gate does not cover); a profile enrolled with --ssh tailscale always carries that boundary as a warning.
+  A headless profile (nsplit add --mode headless) is also checked for lingering, for its user manager running inside the profile's namespace without a login, for the namespace OpenSSH server and for its own
+  PAM service with the placement gate; a manager that is not running, not placed, or whose placement cannot be read is not Ready (there is no next login that would place it).
   Current DNS resolution is checked inside the profile's namespace when run as root. Without those rights, configured DNS is shown separately from unverified current resolution; status never invokes the mutating login helper.
 EOF2
 }
@@ -179,7 +181,23 @@ profile_status() {
 	fi
 	pf=$SDIR/user@$P_UIDN.service.d/50-nsplit.conf
 	[ -f "$pf" ] && grep -q "NetworkNamespacePath=/run/netns/$P_NS" "$pf" && chk PASS "placement drop-in for user@$P_UIDN.service is installed" || chk FAIL "placement drop-in is missing or wrong ($pf)"
-	if grep -q "nsplit-pam-gate $P_LOGIN $P_UIDN $P_NS" "$PAMDIR/plasmalogin" 2>/dev/null && grep -q "nsplit-pam-gate $P_LOGIN $P_UIDN $P_NS" "$PAMDIR/login" 2>/dev/null && [ -x "$GATE" ]; then chk PASS "login gate present in the graphical and console login"
+	if [ "$(profile_mode)" = headless ]; then
+		# a headless profile: the manager is started by systemd-logind at boot (lingering), so its drop-in must make systemd bring the namespace and firewall up first and refuse to start without them
+		grep -q "^Requires=nsplit-netns@$n.service nsplit-firewall.service" "$pf" 2>/dev/null && chk PASS "the placement drop-in requires the profile's namespace and the firewall before the manager starts (fail-closed at boot)" || chk FAIL "the headless placement drop-in does not require the namespace and the firewall ($pf)"
+		chk INFO "headless profile: $P_LOGIN's user manager runs without a login (lingering) inside $P_NS and is reached through the namespace OpenSSH server only"
+		case "$(linger_state "$P_LOGIN"):$([ -e "$LINGERMARK/$n" ] && echo mark || echo nomark)" in
+		on:mark) chk PASS "lingering is on for $P_LOGIN, switched on by nsplit (nsplit remove switches it off again)";;
+		on:nomark) chk WARN "lingering is on for $P_LOGIN, but nsplit has no record of switching it on (nsplit remove will leave it on)";;
+		off:*) chk FAIL "lingering is OFF for $P_LOGIN: their user manager does not start at boot and their services stop at logout (an administrator can switch it on again: sudo loginctl enable-linger $P_LOGIN)";;
+		*) chk UNKNOWN "whether lingering is on for $P_LOGIN ($LINGERDIR is not readable)"; unverified=1;;
+		esac
+		[ "$(unit_state "nsplit-sshd@$n.service")" = active ] && chk PASS "the namespace OpenSSH server is running" || chk FAIL "the namespace OpenSSH server is $(unit_state "nsplit-sshd@$n.service") (the only way into a headless profile)"
+		grep -qx "PAMServiceName nsplit-sshd-$n" "$ETC/ssh/$n/sshd_config" 2>/dev/null && chk PASS "the namespace sshd uses its own PAM service nsplit-sshd-$n" || chk FAIL "the namespace sshd configuration does not name its own PAM service (PAMServiceName nsplit-sshd-$n)"
+		grep -q "nsplit-pam-gate $P_LOGIN $P_UIDN $P_NS" "$PAMDIR/nsplit-sshd-$n" 2>/dev/null && [ -x "$GATE" ] && chk PASS "the PAM service $PAMDIR/nsplit-sshd-$n carries the placement gate after the host's sshd stack" || chk FAIL "the placement gate is missing from the PAM service $PAMDIR/nsplit-sshd-$n"
+		local gfs=$PAMDIR/login gf gk=1; [ ! -e "$PAMDIR/plasmalogin" ] || gfs+=" $PAMDIR/plasmalogin"
+		for gf in $gfs; do grep -q "nsplit-pam-gate $P_LOGIN $P_UIDN $P_NS" "$gf" 2>/dev/null || gk=0; done
+		[ $gk = 1 ] && [ -x "$GATE" ] && chk PASS "login gate present in every login stack that exists here (console$( [ -e "$PAMDIR/plasmalogin" ] && echo ' and graphical'))" || chk FAIL "login gate missing from a login stack"
+	elif grep -q "nsplit-pam-gate $P_LOGIN $P_UIDN $P_NS" "$PAMDIR/plasmalogin" 2>/dev/null && grep -q "nsplit-pam-gate $P_LOGIN $P_UIDN $P_NS" "$PAMDIR/login" 2>/dev/null && [ -x "$GATE" ]; then chk PASS "login gate present in the graphical and console login"
 		grep -q "quiet  stdout  $GATE $P_LOGIN $P_UIDN $P_NS" "$PAMDIR/plasmalogin" 2>/dev/null && grep -q "quiet  stdout  $GATE $P_LOGIN $P_UIDN $P_NS" "$PAMDIR/login" 2>/dev/null \
 			|| chk WARN "the login gate lines are from an older nsplit: a refused console login shows only 'System error' instead of the reason (the next nsplit add or remove rewrites them)"
 	else chk FAIL "login gate missing from a login stack"; fi
@@ -198,12 +216,16 @@ profile_status() {
 		esac
 	else chk UNKNOWN "uid guard (reading the firewall needs root)"; fi
 	mgr=$(manager_pid "$P_UIDN")
-	if [ -z "$mgr" ]; then chk INFO "$P_LOGIN has no running user manager (placement applies at the next login)"; MGR=none
+	if [ -z "$mgr" ]; then
+		if [ "$(profile_mode)" = headless ]; then chk FAIL "$P_LOGIN's user manager is not running (a headless profile's manager runs without a login; an administrator can start it: sudo nsplit start $n)"
+		else chk INFO "$P_LOGIN has no running user manager (placement applies at the next login)"; fi
+		MGR=none
 	elif [ -r "/proc/$mgr/ns/net" ] && [ -n "$(ns_obj "/proc/$mgr/ns/net")" ]; then
 		want=$(ns_obj "$NETNSRUN/$P_NS")
 		if [ -n "$want" ] && [ "$(ns_obj "/proc/$mgr/ns/net")" = "$want" ]; then chk PASS "$P_LOGIN's running user manager is inside $P_NS"; MGR=placed
+		elif [ "$(profile_mode)" = headless ]; then secfail="$P_LOGIN's user manager is NOT inside $P_NS (its services run in the host's network): a headless profile's manager runs without a login, so no new login will place it; an administrator can restart it: sudo systemctl restart user@$P_UIDN.service"; chk FAIL "$secfail"; MGR=unplaced
 		else chk WARN "$P_LOGIN's running user manager is NOT inside $P_NS (log out and back in)"; MGR=unplaced; fi
-	else chk UNKNOWN "whether $P_LOGIN's running user manager is placed (needs root)"; MGR=unknown; fi
+	else chk UNKNOWN "whether $P_LOGIN's running user manager is placed (needs root)"; MGR=unknown; [ "$(profile_mode)" != headless ] || unverified=1; fi
 	# the mounts of the RUNNING consumers (the profile's daemon, its namespace sshd, the user manager). A lost bind is invisible to a fresh probe process, which always gets correct ones, so the
 	# running processes' own mount tables are read. A missing mount is a failure; a view that could not be read (it needs root) is UNKNOWN and keeps the profile from being Ready.
 	if [ -x "$LIB/nsplit-mounts" ]; then
@@ -233,6 +255,7 @@ profile_status() {
 	elif [ "$MGR" = unplaced ]; then S_STATE="Needs new login"; S_DETAIL="placement applies at the next login: $P_LOGIN should log out and back in"
 	elif [ -n "$unverified" ]; then S_STATE="Not checked"; S_DETAIL="something that keeps it safe could not be read: $(printf '%s\n' "${S_CHECKS[@]}" | grep -m1 '^UNKNOWN' | cut -d' ' -f2-) (nsplit status -v $n)"
 	else S_STATE=Ready; S_DETAIL="personal tailnet connected (${host:-?}, ${ips:-no address yet})"; [ "$MGR" = unknown ] && S_DETAIL+="; running session not checked without root"
+		[ "$(profile_mode)" != headless ] || S_DETAIL+="; headless: the user manager lingers inside $P_NS, reached through the namespace OpenSSH server only"
 		[ "${P_SSH:-}" != tailscale ] || S_DETAIL+="; WARNING: Tailscale SSH is on and its tailnet policy, not nsplit, picks the local account (nsplit status -v $n)"; fi
 }
 

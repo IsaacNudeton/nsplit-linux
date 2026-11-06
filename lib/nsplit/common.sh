@@ -12,6 +12,8 @@ VAR=${NSPLIT_VAR:-/var/lib/nsplit}
 OWNDIR=$VAR/owned          # one list per owner: "sha256  path" for every file nsplit created (removal deletes only unmodified files from here)
 BKDIR=$VAR/backup          # first-time backups of files nsplit edits in place
 STATEMARK=$VAR/node-state  # marker per profile: its Tailscale state directory was created by nsplit (kept on removal unless --purge)
+LINGERMARK=$VAR/linger     # marker per headless profile: nsplit switched lingering on for the profile's user (removal switches it off again, and only then)
+LINGERDIR=${NSPLIT_LINGER_DIR:-/var/lib/systemd/linger}   # where systemd-logind keeps one file per lingering user
 RUNDIR=${NSPLIT_RUN:-/run/nsplit}
 SDIR=${NSPLIT_SYSTEMD_DIR:-/etc/systemd/system}
 UNITDIR=${NSPLIT_UNIT_DIR:-/usr/lib/systemd/system}
@@ -36,6 +38,7 @@ GATE=$LIB/nsplit-pam-gate
 SCOPED=$LIB/nsplit-scoped
 DRY=0
 UNDO=()
+UNDO_FAILED=0              # set by rollback_all when an undo step failed: what the command then says must not claim a clean state
 OWNER=_shared
 APPLYING=0                 # 1 while `nsplit add` is applying changes: a failure or an interrupt then undoes them (nsplit_atexit)
 INTR_SIG=""                # the exit status (128 + signal) of a HUP, INT or TERM that arrived while `nsplit add` was applying: acted on at the next safe point (intr_check)
@@ -118,7 +121,7 @@ run() { if [ "$DRY" = 1 ]; then printf '    would run: %s\n' "$*"; return 0; fi;
 # undo_push CMD...: remember how to take back the step just done; rollback_all runs them newest first
 undo_push() { local s; s=$(printf '%q ' "$@"); UNDO+=("$s"); }
 rollback_all() { local i n=${#UNDO[@]}; [ "$n" -gt 0 ] || return 0; warn "undoing $n step(s) done by this command"
-	for ((i=n-1; i>=0; i--)); do eval "${UNDO[$i]}" >/dev/null 2>&1 || warn "undo step failed: ${UNDO[$i]}"; done; UNDO=(); }
+	for ((i=n-1; i>=0; i--)); do eval "${UNDO[$i]}" >/dev/null 2>&1 || { UNDO_FAILED=1; warn "undo step failed: ${UNDO[$i]}"; }; done; UNDO=(); }
 
 # ---------------------------------------------------------------- ownership records
 own_file() { printf '%s/%s.list' "$OWNDIR" "$1"; }
@@ -166,12 +169,16 @@ profile_exists() { [ -r "$PROFDIR/$1.env" ]; }
 profile_load() {
 	profile_exists "$1" || return 1
 	# shellcheck disable=SC1090
-	eval "$( . "$PROFDIR/$1.env"; for v in NAME LOGIN UIDN NS VH VN HOST_IP NS_IP PLEN TS_IF TS_PORT TS_HOSTNAME SSH MANAGED; do printf 'P_%s=%q\n' "$v" "${!v-}"; done )"
+	eval "$( . "$PROFDIR/$1.env"; for v in NAME LOGIN UIDN NS VH VN HOST_IP NS_IP PLEN TS_IF TS_PORT TS_HOSTNAME SSH MANAGED MODE; do printf 'P_%s=%q\n' "$v" "${!v-}"; done )"
 }
 # profile_operator: the Tailscale operator this profile's enrolment calls for, printed (nothing = root only). Needs profile_load.
 # MANAGED=owner: the profile's user may run tailscale / nsplit login themselves. Anything else, INCLUDING a record that says nothing (written before the policy was recorded),
 # is root-managed: unknown never widens who may operate the node.
 profile_operator() { [ "${P_MANAGED:-}" = owner ] && printf %s "$P_LOGIN"; return 0; }
+# profile_mode: desktop or headless. Needs profile_load. A record written before the mode existed says nothing and is desktop; any other value is treated as desktop too (nothing unknown turns headless behaviour on).
+profile_mode() { [ "${P_MODE:-}" = headless ] && printf headless || printf desktop; }
+# linger_state LOGIN: on | off | unknown, from the file systemd-logind keeps (an unreadable directory is not "off")
+linger_state() { if [ -e "$LINGERDIR/$1" ]; then printf on; elif [ -d "$LINGERDIR" ] && [ -r "$LINGERDIR" ]; then printf off; else printf unknown; fi; }
 sock_of() { printf '%s/tailscale-%s/tailscaled.sock' "$TSRUN" "$1"; }
 ts() { local n=$1; shift; "$TS_BIN" --socket="$(sock_of "$n")" "$@"; }
 backend_state() { ts "$1" status --json 2>/dev/null | pyj 'd.get("BackendState","")'; }
@@ -193,6 +200,30 @@ user_busy() {
 	st=$(sed -n 's/^MainPID=//p' <<<"$o"); case $st in ''|*[!0-9]*) return 2;; esac
 	[ "$st" -gt 1 ] && return 0
 	return 1
+}
+
+# user_sessions LOGIN UID: 0 = the user has a login session (SSH, console, graphical), 1 = none, 2 = could not be determined. The user MANAGER is not looked at: a headless profile's manager is
+# supposed to be running (lingering), so only a session counts as "somebody is logged in". systemd-logind gives every user manager a session of its own (class manager or manager-early, service
+# systemd-user: seen in `loginctl list-sessions` of a lingering user), which is not a login; any other class counts, and so does a session whose class cannot be read (it may have ended a moment ago:
+# the conservative answer is "in use"). A failed listing is never "nobody is there".
+user_sessions() {
+	local login=$1 uid=$2 s id cls
+	s=$($LOGINCTL list-sessions --no-legend 2>/dev/null) || return 2
+	for id in $(awk -v u="$login" -v i="$uid" '$2==i || $3==u {print $1}' <<<"$s"); do
+		cls=$($LOGINCTL show-session "$id" -p Class --value 2>/dev/null) || cls=unreadable
+		case $cls in manager|manager-early) ;; *) return 0;; esac
+	done
+	return 1
+}
+
+# user_session_ids LOGIN UID: the logind sessions of the user that are not the manager's own, space separated (for the text of a refusal)
+user_session_ids() {
+	local login=$1 uid=$2 id cls o=""
+	for id in $($LOGINCTL list-sessions --no-legend 2>/dev/null | awk -v u="$login" -v i="$uid" '$2==i || $3==u {print $1}'); do
+		cls=$($LOGINCTL show-session "$id" -p Class --value 2>/dev/null) || cls=unreadable
+		case $cls in manager|manager-early) ;; *) o+="${o:+ }$id";; esac
+	done
+	printf %s "$o"
 }
 
 # ---------------------------------------------------------------- discovery
