@@ -28,13 +28,14 @@ do not weaken the check.
 ## Build the packaged snapshot
 
 This repository began as a single-commit snapshot of nsplit 0.1.0-13 and is now
-nsplit **0.1.0-17**. The reviewed runtime baseline, 0.1.0-12, is described in
+nsplit **0.2.0-alpha.1** (an alpha: see below). The reviewed runtime baseline, 0.1.0-12, is described in
 [VALIDATION.md](VALIDATION.md); the 0.1.0-13 package differed from it only by the added
 MIT license text, 0.1.0-14 adds the fixes for issues #1 to #3 (see
 [former known issues](VALIDATION.md#former-known-issues)), 0.1.0-15 the fixes for
 #7 and #8 (see [validation](VALIDATION.md#defects-7-and-8-fixed-in-010-15)), 0.1.0-16 the
 fixes for #9 and #10 (see [validation](VALIDATION.md#defect-10-fixed-in-010-16)), and 0.1.0-17 the
-fix for #17, the temporary files (see [validation](VALIDATION.md#issue-17-fixed-in-0110-17)).
+fix for #17, the temporary files (see [validation](VALIDATION.md#issue-17-fixed-in-0110-17)). **0.2.0-alpha.1 adds headless profiles**, a new feature that has had no independent review (see
+[validation](VALIDATION.md#headless-profiles-020-alpha1)); pacman versions cannot contain a hyphen, so the package is called `0.2.0alpha.1` (it sorts after 0.1.0-17 and before 0.2.0).
 The following creates a source checkout on a new evaluation machine. For an
 existing development checkout, use that checkout rather than creating duplicates.
 
@@ -43,7 +44,7 @@ git clone https://github.com/IsaacNudeton/nsplit-linux.git
 cd nsplit-linux
 make check
 make dist
-cp nsplit-0.1.0.tar.gz packaging/arch/
+cp nsplit-0.2.0alpha.1.tar.gz packaging/arch/
 (cd packaging/arch && makepkg --syncdeps)
 ```
 
@@ -56,7 +57,7 @@ verification of an arbitrary downloaded archive.
 Install only the package you just built, in the evaluation VM:
 
 ```sh
-sudo pacman -U packaging/arch/nsplit-0.1.0-17-any.pkg.tar.zst
+sudo pacman -U packaging/arch/nsplit-0.2.0alpha.1-1-any.pkg.tar.zst
 pacman -Q nsplit
 nsplit --version
 ```
@@ -114,7 +115,7 @@ the profile as Degraded, with the command that turns it off, when it is on altho
 `none` or `openssh`; a setting it cannot read is `Not checked`. On a root-managed profile the profile's
 user was refused when they tried to switch it on (one profile, Tailscale 1.104.2, measured), and an
 administrator can switch it on; status reports that the same way.
-Enrollment still requires the Plasma login manager whichever mode you choose.
+Desktop enrollment (the default, `--mode desktop`) still requires the Plasma login manager whichever SSH mode you choose; a headless profile (`--mode headless`, below) does not.
 Use an explicit generic hostname when you do not want the default machine-derived
 name to appear in the tailnet.
 
@@ -143,6 +144,41 @@ no passwords, and no forwarding of ports, agents or client environment. Put the 
 OpenSSH 10 resets new connections from an address that has just failed several logins, for a while; and a service
 started inside the profile that listens on all addresses is reachable over the tailnet **and** from the host
 namespace over the profile's private link, by any process of the host.
+
+## Headless profiles (`--mode headless`, alpha)
+
+For a computer where users need a private network but no desktop: for example one shared GPU machine whose users run their own services, each in their own network and each reached only over their own
+tailnet. The user's systemd service manager (`user@UID.service`) stays running **without any login**, inside the profile's network namespace, so the user's own `systemctl --user` services start at boot, keep running
+after the user logs out, and run in the profile's network. This is an alpha feature (0.2.0-alpha.1): read what was and was not tested in [validation](VALIDATION.md#headless-profiles-020-alpha1).
+
+```sh
+sudo nsplit add alice --mode headless      # --ssh openssh and root-managed are implied; no Plasma login manager is needed
+sudo nsplit login alice                    # an administrator runs it; alice opens the link it prints and approves with her own Tailscale account
+# alice puts her public key in ~/.ssh/authorized_keys (or an administrator in /etc/nsplit/ssh/alice/authorized_keys), then, from a node of her tailnet:
+ssh alice@<the profile's Tailscale address or name>
+systemctl --user enable --now my-service.service   # in that session: it starts at boot, survives logouts, runs in her network
+```
+
+What the mode does, and requires:
+
+- **Always `--ssh openssh` and root-managed.** The namespace OpenSSH server is how the user is reached; Tailscale's built-in SSH stays off. The user is not the node's Tailscale operator, so (in the one
+  profile and Tailscale version measured) they cannot switch the built-in SSH on; `nsplit status` reports it if an administrator does. `--ssh none`, `--ssh tailscale` and `--accept-tailscale-ssh-risk` are refused with it.
+- **A dedicated PAM service for the namespace sshd.** The profile's sshd is configured with `PAMServiceName nsplit-sshd-NAME` (checked with `sshd -T` when it is added): the host's own `sshd` stack, unchanged,
+  then nsplit's placement gate after `pam_systemd`. A login is accepted only when the user's manager is active **and inside the profile's namespace**. Nothing is added to the host's `sshd`, `login` or `plasmalogin`
+  PAM files for this (the console login stack still gets the same gate lines as for every profile, and the graphical one only when it exists).
+- **Fail-closed at boot.** systemd-logind starts a lingering manager by itself, so the placement drop-in *requires* the profile's namespace and the firewall (systemd brings them up first and stops the manager with them) and
+  wants the daemon and the sshd; if the namespace cannot be joined the manager fails to start instead of running in the host's network.
+- **Lingering is switched on last** (`loginctl enable-linger`, after the network, firewall, daemon, placement, namespace sshd and login gate are in place) and recorded as nsplit's own. The preflight **refuses a user who
+  already has lingering enabled**. A failed or interrupted add, and `nsplit remove`, switch it off again and stop the manager, after checking that the user has no login session; lingering nsplit did not switch on is never touched.
+- **`stop`, `start`, `remove`.** For a headless profile only a *login session* (SSH, console, graphical) counts as "logged in"; the manager's own logind session does not. `nsplit stop` stops the manager first (lingering stays
+  on; `nsplit start` brings the manager back last). `nsplit remove` refuses while a session exists; otherwise it stops the manager, switches nsplit's lingering off, removes the placement and the rest in one pass, and leaves the
+  account, its home and its own unit files alone. If lingering cannot be switched off the placement stays and the removal is reported as unfinished (the same command finishes it).
+- **`nsplit status`** shows the mode, whether lingering is on and whose doing it is, the manager's placement, the namespace sshd and its PAM service; a manager that is not running, not inside the namespace, or whose
+  placement cannot be read is **not Ready** (no later login would place it), and an unplaced manager is a Degraded security finding shown first.
+- **A service the user runs that listens on all addresses** (`0.0.0.0`) inside the profile is reachable from the tailnet **and**, over the profile's private link, from any process on this machine. The add says so. Bind such a service
+  to the profile's tailnet address if that matters; nothing in this release restricts it.
+- The host's own `sshd` is **unchanged**: an enrolled headless user can still log in there and gets a shell in the host's network namespace (the UID guard keeps it off the network). Refusing them there is a separate,
+  optional policy that this release does not include.
 
 ## Sign in and verify
 

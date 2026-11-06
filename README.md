@@ -12,6 +12,9 @@ work is complete; this is not a claim of general Linux compatibility or a
 production deployment certification. Start in a disposable virtual machine.
 See [validation and limits](docs/VALIDATION.md).
 
+**0.2.0-alpha.1 adds an alpha feature, [headless profiles](docs/USAGE.md#headless-profiles---mode-headless-alpha)** (`nsplit add USER --mode headless`). It was tested in a disposable
+guest on a throwaway lab tailnet as scoped in [validation](docs/VALIDATION.md#headless-profiles-020-alpha1), and has had no independent review.
+
 ## What it does
 
 - Places an enrolled account's systemd user manager and programs started from it
@@ -22,6 +25,10 @@ See [validation and limits](docs/VALIDATION.md).
   resolver and other names through configured public resolvers.
 - Reports observed failures separately from checks it cannot perform, and
   repairs eligible managed DNS configuration through the existing login command.
+- Optionally (`--mode headless`, alpha) keeps the user's service manager running without a login
+  inside the profile's namespace, so the user's own services run in their private network across
+  logouts and reboots, and the user is reached only through the profile's own OpenSSH server over
+  their tailnet; no desktop or Plasma login manager is needed.
 
 Ordinary internet traffic uses permitted physical uplinks. This is **not** an
 all-traffic Tailscale exit-node configuration, anonymity tool or complete
@@ -95,7 +102,7 @@ See [validation and limits](docs/VALIDATION.md) for exactly what was and was not
 
 ### Former known issues, fixed in this snapshot
 
-The focused test found three problems. Each is fixed in 0.1.0-14 (this snapshot is 0.1.0-17)
+The focused test found three problems. Each is fixed in 0.1.0-14 (this snapshot is 0.2.0-alpha.1)
 and its issue is closed. The fixes were tested off-host and in a disposable guest on the reviewed
 0.1.0-12 program files with the changed files copied over them. The 0.1.0-14 package built from
 this repository was later installed over 0.1.0-12 in a disposable guest for the Tailscale SSH test,

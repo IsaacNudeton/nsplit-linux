@@ -23,6 +23,17 @@ also listens on the profile's private link to the host, not only on its tailnet.
 inside a profile that listens on all addresses is reachable from the host's own processes over that link (the
 namespace firewall accepts the host's address), whoever the host process runs as.
 
+**Headless profiles (`--mode headless`, alpha).** The user's service manager stays running without a login (systemd lingering that nsplit switches on, last, and off again on removal) inside the
+profile's namespace, and the user is reached through the profile's own OpenSSH server over their tailnet. What this relies on, and where it stops:
+(1) the profile is root-managed, so the user is not the node's Tailscale operator and, in the one profile and Tailscale version measured, could not switch the built-in Tailscale SSH on; `nsplit status`
+reports it if an administrator does. (2) The namespace sshd has its own PAM service: the host's sshd stack unchanged, then nsplit's placement gate after `pam_systemd`, so a login is accepted only when the
+user's manager is active and inside the profile's namespace; a gate that cannot run and a missing service file both refuse the login (tested). (3) systemd-logind starts the manager at boot, not a login, so the
+placement drop-in *requires* the profile's namespace and firewall: with the namespace handle broken the manager failed to start instead of running in the host's network (tested). Removing the drop-in by hand starts
+the manager in the host's network: the gate then refuses every SSH login, the UID guard keeps its processes off the network beyond loopback, and `nsplit status` says Degraded (tested), but loopback and files
+remain available to it. (4) A user service that listens on all addresses is reachable from the tailnet **and** from any process on this machine over the profile's private link (see above). (5) The host's own
+sshd is unchanged: a headless user can still log in there and gets a shell in the host namespace (UID guard as above); refusing that is a separate optional policy that this release does not include. (6) Lingering is a
+per-user logind setting for the whole machine: nsplit refuses to enrol a user who already has it, never touches lingering it did not switch on, and switches its own off only after checking that there is no login session.
+
 **`--ssh tailscale` does not carry the protections of `--ssh openssh`** ([#9](https://github.com/IsaacNudeton/nsplit-linux/issues/9)).
 Which local account a Tailscale SSH session becomes is decided by the SSH policy of the
 tailnet the profile is signed in to, which is the profile user's own account: in the test,
