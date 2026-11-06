@@ -18,7 +18,7 @@ The test environment was a disposable CachyOS guest using the documented
 systemd/Plasma-login-manager integration. Documentation-only changes do not
 extend the tested runtime scope.
 
-**This snapshot is 0.1.0-15.** 0.1.0-13 added the MIT license and its packaging only:
+**This snapshot is 0.1.0-16.** 0.1.0-13 added the MIT license and its packaging only:
 building both packages and comparing them showed the 25 installed program files
 byte-identical, in content and mode, to the reviewed 0.1.0-12 package, and the only added
 file was `/usr/share/licenses/nsplit/LICENSE`. **0.1.0-14 is different: it changes
@@ -27,6 +27,7 @@ and adds one command, one helper and three systemd units for the mount watcher.
 **0.1.0-15 changes two files relative to -14** (`cmd-ops.sh` and `nsplit-ufw`; comparing the two
 packages showed 31 installed files, exactly those two different) to fix #7 and #8, see
 [below](#defects-7-and-8-fixed-in-010-15).
+**0.1.0-16 changes `cmd-ops.sh` relative to -15** to fix #10, see [below](#defect-10-fixed-in-010-16).
 The guest tests of the fixes ran on the 0.1.0-12 baseline package, with the changed files
 copied over it (originals restored and checked afterwards). The -13 package was not installed.
 **The -14 package built from this repository (main 49ed71b) was installed over 0.1.0-12 in
@@ -148,7 +149,8 @@ and `nsplit mounts repair` re-attached them without restarting anything.
   `tailscaled --ssh` node with nothing of nsplit: a client killed abruptly leaves the remote
   interactive login shell running (still there after 90 s, the user manager stays up), and
   stopping the daemon with a session open waits for systemd's stop timeout (10 s here) and ends
-  in SIGKILL, so `nsplit stop --force` with an open session exits 1 although the profile is down.
+  in SIGKILL, so `nsplit stop --force` with an open session exited 1 although the profile was down
+  (fixed in 0.1.0-16, [below](#defect-10-fixed-in-010-16)).
 - **Two defects not specific to SSH,** both fixed in 0.1.0-15 (next section): changing the uplinks
   left ufw route rules for the previous uplinks ([#7](https://github.com/IsaacNudeton/nsplit-linux/issues/7)); `nsplit remove` left
   `scoped-NAME.lock` ([#8](https://github.com/IsaacNudeton/nsplit-linux/issues/8)).
@@ -189,6 +191,45 @@ untouched, no file, and the three odd kinds kept with exit 1 and finished on ret
 and mutants as above) and in the guest (a throwaway profile removed with its lock file, the others' files
 still there, the guest's nsplit state equal to its state before the run). The 0.1.0-15 package in the guest
 was upgraded in place from -14 (31 files compared, 2 changed).
+
+### Defect #10 (fixed in 0.1.0-16)
+
+**[#10](https://github.com/IsaacNudeton/nsplit-linux/issues/10) — `nsplit stop --force` reported a failure with a Tailscale SSH session open.** *Found* in the
+Tailscale SSH test: the daemon holding the session did not exit within systemd's stop time-out
+(10 s), systemd killed it, the profile really was down, but the unit was left `failed` and
+nsplit's own check ("every unit inactive") reported that the stop had failed (exit 1). The same
+time-out and kill happened on a bare `tailscaled --ssh` node, so it is Tailscale's behaviour; nsplit
+changed only how it reports the result. *Fix:* after the stop nsplit reads the daemon unit's
+`ActiveState`, `SubState`, `Result`, `MainPID` and `ControlPID`. It accepts the one state
+`failed` with `Result=timeout`, no main and no control process, and only when `systemctl` itself
+succeeded, the profile's namespace and every other unit of the profile are down, and `reset-failed`
+clears the state and the unit then reads `inactive`. It prints a warning that the daemon was
+killed (so not a graceful stop). A surviving process or namespace, a failure of another kind, another
+unit, a state that cannot be read, and a state that cannot be reset all stay "NOT fully stopped" with the
+diagnosis kept. The path without a session is unchanged (one `reset-failed` before the stop, no warning,
+under 10 s). The refusals of `stop` and `remove` for a user who is logged in now say that a shell left
+behind by an abruptly closed Tailscale SSH connection counts, and name
+`loginctl terminate-user USER` as the administrator's explicit action; nsplit never runs it.
+*Tested:* off-host with a fake systemd, 30 checks (a positive control that the fake loginctl logs what
+nsplit calls, the killed daemon with exit 0 and the cleared state, the no-session path unchanged, `remove`
+and `stop --all` with a killed daemon, and eleven cases that must NOT be normalised: systemctl exiting 1,
+a process alive, a control process running, the namespace not gone, reset-failed failing, reset-failed lying,
+facts unreadable, facts nonsensical, another failure result, another unit, and a second failed unit); the same
+checks against the unfixed code fail 11 of 30, and nine mutants that each remove one safeguard are each
+rejected by named checks. The existing suites on the integrated tree are unchanged. In the disposable
+guest on the real 0.1.0-16 package (upgraded in place from -15, 31 files compared) with a throwaway
+profile enrolled with `--ssh tailscale` on the lab tailnet: no session, stop exit 0 in 3 s with no warning;
+with a Tailscale SSH command session open, a plain stop refused with the new text and
+stopped nothing, `stop --force` hit the time-out (journal), exited 0 after 12 s, warned, left the unit
+`inactive` rather than `failed`, left nothing in the namespace, and `start` brought the node back
+Running with Tailscale SSH on; after the client was killed abruptly the abandoned login shell was still
+running 20 s later, `stop` and `remove` refused naming `loginctl terminate-user`, nsplit ended nothing,
+and after the test side ran that command the plain stop succeeded; `stop --all --force` with a session
+open stopped all six profiles and then the shared firewall, exit 0, with the warning for the one killed
+daemon, and `start --all` brought everything back. *Not tested:* other Tailscale versions; a daemon that
+survives SIGKILL or a namespace that cannot be removed on the real system (those cases were
+injected off-host only); `nsplit remove` with a killed daemon on the real system (off-host only); a
+graphical session.
 
 ## Former known issues
 
@@ -295,8 +336,9 @@ does not configure this.
 - `--ssh openssh` and `--ssh tailscale` were tested only as scoped above (one profile each, the
   Tailscale test on a lab control server, not on Tailscale's).
 - The fixes of the three former issues were tested as changed files over the 0.1.0-12 baseline
-  package; the 0.1.0-14 package built from this repository was exercised in the Tailscale SSH test and
-  the 0.1.0-15 package, upgraded in place from -14, for the fixes of #7 and #8 only. This documentation is
+  package; the 0.1.0-14 package built from this repository was exercised in the Tailscale SSH test, the
+  0.1.0-15 package, upgraded in place from -14, for the fixes of #7 and #8 only, and the 0.1.0-16 package,
+  upgraded in place from -15, for the fix of #10 only. This documentation is
   not a claim that the package is ready for any particular deployment.
 - A fresh `nsplit add` on the final -12 guest package, a graphical desktop run on
   that package, or an installation on the real workstation was not demonstrated

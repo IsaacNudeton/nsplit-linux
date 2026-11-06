@@ -81,7 +81,7 @@ See [validation and limits](docs/VALIDATION.md) for exactly what was and was not
 
 ### Former known issues, fixed in this snapshot
 
-The focused test found three problems. Each is fixed in 0.1.0-14 (this snapshot is 0.1.0-15)
+The focused test found three problems. Each is fixed in 0.1.0-14 (this snapshot is 0.1.0-16)
 and its issue is closed. The fixes were tested off-host and in a disposable guest on the reviewed
 0.1.0-12 program files with the changed files copied over them. The 0.1.0-14 package built from
 this repository was later installed over 0.1.0-12 in a disposable guest for the Tailscale SSH test,
@@ -102,12 +102,18 @@ installed package; see [validation](docs/VALIDATION.md#defects-7-and-8-fixed-in-
 - [#7](https://github.com/IsaacNudeton/nsplit-linux/issues/7): changing the uplinks left ufw route rules for the previous uplinks. They are now deleted first.
 - [#8](https://github.com/IsaacNudeton/nsplit-linux/issues/8): `nsplit remove` left `/var/lib/nsplit/scoped-NAME.lock`. It is now removed.
 
+Fixed in 0.1.0-16 (tested off-host with controls and mutants, and in a disposable guest on the installed package; see
+[validation](docs/VALIDATION.md#defect-10-fixed-in-010-16)):
+
+- [#10](https://github.com/IsaacNudeton/nsplit-linux/issues/10): `nsplit stop --force` reported a failure when a Tailscale SSH session was open, because
+  Tailscale's own shutdown (10 s stop time-out, then SIGKILL) leaves the daemon unit `failed`. nsplit now checks that nothing of the
+  profile is left, clears that one state, says the stop was not graceful and exits 0. The refusal for a user who is still logged in
+  now names `loginctl terminate-user USER` as the administrator's way out; nsplit never runs it.
+
 Open and unfixed in this snapshot:
 
 - [#9](https://github.com/IsaacNudeton/nsplit-linux/issues/9): `--ssh tailscale`: the tailnet policy chooses the local account, and the login gate and
   `--ssh none` do not apply.
-- [#10](https://github.com/IsaacNudeton/nsplit-linux/issues/10): `nsplit stop --force` reports a failure when a Tailscale SSH session is open (Tailscale's
-  own shutdown behaviour).
 
 Enrollment changes login/network configuration and requires an administrator.
 The target account must be logged out, with no running user manager; programs
