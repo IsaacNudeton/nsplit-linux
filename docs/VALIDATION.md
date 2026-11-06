@@ -18,12 +18,15 @@ The test environment was a disposable CachyOS guest using the documented
 systemd/Plasma-login-manager integration. Documentation-only changes do not
 extend the tested runtime scope.
 
-**This snapshot is 0.1.0-14.** 0.1.0-13 added the MIT license and its packaging only:
+**This snapshot is 0.1.0-15.** 0.1.0-13 added the MIT license and its packaging only:
 building both packages and comparing them showed the 25 installed program files
 byte-identical, in content and mode, to the reviewed 0.1.0-12 package, and the only added
 file was `/usr/share/licenses/nsplit/LICENSE`. **0.1.0-14 is different: it changes
 runtime code** to fix the three issues under [Former known issues](#former-known-issues)
 and adds one command, one helper and three systemd units for the mount watcher.
+**0.1.0-15 changes two files relative to -14** (`cmd-ops.sh` and `nsplit-ufw`; comparing the two
+packages showed 31 installed files, exactly those two different) to fix #7 and #8, see
+[below](#defects-7-and-8-fixed-in-010-15).
 The guest tests of the fixes ran on the 0.1.0-12 baseline package, with the changed files
 copied over it (originals restored and checked afterwards). The -13 package was not installed.
 **The -14 package built from this repository (main 49ed71b) was installed over 0.1.0-12 in
@@ -146,9 +149,9 @@ and `nsplit mounts repair` re-attached them without restarting anything.
   interactive login shell running (still there after 90 s, the user manager stays up), and
   stopping the daemon with a session open waits for systemd's stop timeout (10 s here) and ends
   in SIGKILL, so `nsplit stop --force` with an open session exits 1 although the profile is down.
-- **Two defects not specific to SSH:** changing the uplinks leaves ufw route rules for the
-  previous uplinks ([#7](https://github.com/IsaacNudeton/nsplit-linux/issues/7)); `nsplit remove` leaves `scoped-NAME.lock`
-  ([#8](https://github.com/IsaacNudeton/nsplit-linux/issues/8)).
+- **Two defects not specific to SSH,** both fixed in 0.1.0-15 (next section): changing the uplinks
+  left ufw route rules for the previous uplinks ([#7](https://github.com/IsaacNudeton/nsplit-linux/issues/7)); `nsplit remove` left
+  `scoped-NAME.lock` ([#8](https://github.com/IsaacNudeton/nsplit-linux/issues/8)).
 
 Not covered: Tailscale's own control plane and its SSH policy features (the `check`
 re-authentication mode, session recording, tags, grants), Tailscale versions other than
@@ -157,6 +160,35 @@ session, IPv6, what an unplaced user manager could reach, nsplit's own interacti
 and whether Tailscale's default policy for a new tailnet allows `root` (a policy that lists it
 was tested, not the default). The guest was left as it was before the test apart from the
 package upgrade.
+
+### Defects #7 and #8 (fixed in 0.1.0-15)
+
+**[#7](https://github.com/IsaacNudeton/nsplit-linux/issues/7) — stale ufw route rules after changing the uplinks.** *Found* in the Tailscale SSH
+test: after `nsplit uplinks --set` moved the uplinks to a lab interface and back, route rules for the lab
+interface were still in ufw's rule file and in the live ruleset for every profile, including one removed
+later. *Fix:* the rules of the uplinks that leave the list are deleted first (the helper takes the
+dropped uplinks in an environment variable, interface-name characters only, for deletion only); a failing
+delete stops the command before anything is changed, so it can be run again; the rules of an uplink that
+stays are never touched. *Tested:* off-host with a stateful fake ufw, 21 checks including adding, dropping,
+replacing, the same list again, a failing delete and its retry, and spacing in the list; the same checks
+against the unfixed code fail 16 of 21, and seven mutants that each remove one safeguard are each rejected
+by named checks; the existing suites are unchanged (403, 98 and 46 checks, all passing). In the disposable
+guest with real ufw (active) on the changed files over the installed -14 package, and again on the real
+installed 0.1.0-15 package: a dummy interface added and dropped as an uplink left no rule for it in the file
+or the live ruleset and kept those of the real uplink; with ufw's rule file made immutable the delete
+failed, the command said nothing was changed and nothing was, and the same command finished once the file
+was writable again. *Not tested:* a list edited by hand followed by `nsplit reload` (not covered by the
+fix); other ufw versions.
+
+**[#8](https://github.com/IsaacNudeton/nsplit-linux/issues/8) — `scoped-NAME.lock` left by `nsplit remove`.** *Found* in the same test: the profile's DNS
+step creates the empty file `/var/lib/nsplit/scoped-NAME.lock` and nothing records it, so removal left it.
+*Fix:* removal deletes exactly the kind of file the step makes (an empty regular file with one link); a
+symlink, a file with content or one with a second link is kept, reported, and keeps the profile registered
+like any file nsplit did not write. *Tested:* off-host (the empty file removed, another profile's file
+untouched, no file, and the three odd kinds kept with exit 1 and finished on retry once dealt with; controls
+and mutants as above) and in the guest (a throwaway profile removed with its lock file, the others' files
+still there, the guest's nsplit state equal to its state before the run). The 0.1.0-15 package in the guest
+was upgraded in place from -14 (31 files compared, 2 changed).
 
 ## Former known issues
 
@@ -263,8 +295,9 @@ does not configure this.
 - `--ssh openssh` and `--ssh tailscale` were tested only as scoped above (one profile each, the
   Tailscale test on a lab control server, not on Tailscale's).
 - The fixes of the three former issues were tested as changed files over the 0.1.0-12 baseline
-  package; the 0.1.0-14 package built from this repository was exercised only in the Tailscale SSH
-  test. This documentation is not a claim that the package is ready for any particular deployment.
+  package; the 0.1.0-14 package built from this repository was exercised in the Tailscale SSH test and
+  the 0.1.0-15 package, upgraded in place from -14, for the fixes of #7 and #8 only. This documentation is
+  not a claim that the package is ready for any particular deployment.
 - A fresh `nsplit add` on the final -12 guest package, a graphical desktop run on
   that package, or an installation on the real workstation was not demonstrated
   by the final acceptance program. Earlier-version and controlled tests retain
