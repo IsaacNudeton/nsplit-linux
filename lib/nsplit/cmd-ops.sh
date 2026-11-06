@@ -9,22 +9,52 @@ targets() { # targets ARG -> profile names ("--all" = every profile)
 profile_busy() { ( . "$PROFDIR/$1.env"; user_busy "$LOGIN" "$UIDN" ); }
 # profile_units N: the units one profile owns, in the order they are stopped
 profile_units() { printf 'nsplit-sshd@%s.service nsplit-dns@%s.service nsplit-tailscaled@%s.service nsplit-netns@%s.service' "$1" "$1" "$1" "$1"; }
+# unit_facts UNIT: ActiveState, SubState, Result, MainPID and ControlPID of a unit, read together, into U_ACTIVE U_SUB U_RESULT U_MAIN U_CTRL.
+# Fails (and leaves them empty) when any of the five is missing or a process id is not a number: nothing is concluded from a state that could not be read.
+unit_facts() {
+	local o a s r m c
+	U_ACTIVE=; U_SUB=; U_RESULT=; U_MAIN=; U_CTRL=
+	o=$($SYSTEMCTL show -p ActiveState -p SubState -p Result -p MainPID -p ControlPID "$1" 2>/dev/null) || return 1
+	a=$(sed -n 's/^ActiveState=//p' <<<"$o"); s=$(sed -n 's/^SubState=//p' <<<"$o"); r=$(sed -n 's/^Result=//p' <<<"$o")
+	m=$(sed -n 's/^MainPID=//p' <<<"$o"); c=$(sed -n 's/^ControlPID=//p' <<<"$o")
+	[ -n "$a" ] && [ -n "$s" ] && [ -n "$r" ] || return 1
+	case $m in ''|*[!0-9]*) return 1;; esac
+	case $c in ''|*[!0-9]*) return 1;; esac
+	U_ACTIVE=$a; U_SUB=$s; U_RESULT=$r; U_MAIN=$m; U_CTRL=$c
+}
+# killed_by_stop_timeout UNIT: true only for a unit that is `failed` because it did not exit within systemd's stop time-out and was killed (Result=timeout) and that has no process left (MainPID=0, ControlPID=0)
+killed_by_stop_timeout() { unit_facts "$1" && [ "$U_ACTIVE" = failed ] && [ "$U_RESULT" = timeout ] && [ "$U_MAIN" = 0 ] && [ "$U_CTRL" = 0 ]; }
 # stop_profile N [disable]: stop (optionally also disable) the profile's units, then CHECK the result: every unit inactive and the namespace gone.
 # Needs profile_load N. Returns 0 only when that is true; otherwise says what is still up on stderr and returns 1. systemctl's own exit status is not enough.
+# One state is accepted although it is not `inactive`: the Tailscale daemon killed after systemd's stop time-out (an open Tailscale SSH session keeps it from exiting in time: Tailscale's own behaviour,
+# also seen on a node without nsplit). It counts as stopped only when systemctl itself succeeded, the unit has no main or control process, the namespace and every other unit of the profile are down,
+# and its leftover failed state could be cleared and then read as inactive. The warning says it was not a graceful stop. Everything else (a surviving process or namespace, a state that cannot be read, a failure of another kind) stays a failure.
 stop_profile() {
-	local n=$1 how=${2:-stop} u st rc=0 left="" units nsl
+	local n=$1 how=${2:-stop} u st rc=0 left="" units nsl forced="" ts=nsplit-tailscaled@$1.service
 	units=$(profile_units "$n")
 	# shellcheck disable=SC2086
 	$SYSTEMCTL reset-failed $units >/dev/null 2>&1   # a failed state seen below then comes from THIS attempt, not from an old crash
 	# shellcheck disable=SC2086
 	if [ "$how" = disable ]; then $SYSTEMCTL disable --now $units || rc=1; else $SYSTEMCTL stop $units || rc=1; fi
-	for u in $units; do st=$(unit_state "$u"); [ "$st" = inactive ] || left+="$u is $st; "; done
+	for u in $units; do st=$(unit_state "$u")
+		[ "$st" = inactive ] && continue
+		if [ "$u" = "$ts" ] && [ "$st" = failed ] && [ $rc = 0 ] && killed_by_stop_timeout "$u"; then forced=$u; continue; fi
+		left+="$u is $st; "
+	done
 	if nsl=$($IP netns list 2>/dev/null); then awk '{print $1}' <<<"$nsl" | grep -qx "$P_NS" && left+="the namespace $P_NS still exists; "
 	else left+="could not list network namespaces to confirm $P_NS is gone; "; fi
+	if [ -n "$forced" ]; then
+		if [ -z "$left" ] && $SYSTEMCTL reset-failed "$forced" >/dev/null 2>&1 && [ "$(unit_state "$forced")" = inactive ]; then
+			warn "$n's Tailscale daemon did not exit within systemd's stop time-out and was killed (an open Tailscale SSH session is the usual cause), so this was not a graceful stop. No process or namespace of $n is left and the daemon's failed state was cleared."
+		else left+="$forced was killed after systemd's stop time-out and is still failed; "; fi
+	fi
 	[ $rc = 0 ] && [ -z "$left" ] && return 0
 	warn "$n is NOT fully stopped: ${left:-systemctl reported an error while stopping its units}"
 	return 1
 }
+# busy_hint N: what to add to a refusal because the user is logged in: an abandoned shell counts as logged in, and the administrator can end it explicitly (nsplit never does)
+busy_hint() { local l; l=$( . "$PROFDIR/$1.env"; printf %s "$LOGIN" )
+	printf 'A shell left behind by an abruptly closed Tailscale SSH connection counts as logged in. If nobody is really using the account, an administrator can end every process of that user with: loginctl terminate-user %s (nsplit never runs that for you).' "$l"; }
 
 usage_start() { cat <<'EOF2'
 usage: nsplit start (PROFILE | --all)
@@ -89,6 +119,8 @@ usage: nsplit stop (PROFILE | --all) [--force]
   Stop a profile's managed networking now (it starts again at boot, or with nsplit start). Stopping the namespace ends every process inside it,
   so it refuses while the user is logged in (or when that cannot be checked) unless --force. --all also stops the shared firewall.
   It reports "stopped" only after checking that every unit is down and the namespace is gone; otherwise it says what is still up and exits 1.
+  With a Tailscale SSH session open the Tailscale daemon may not exit within systemd's stop time-out and is killed (Tailscale's own behaviour). When nothing of the profile is left running
+  nsplit clears the daemon's leftover failed state, reports "stopped" and warns that the stop was not graceful. A daemon or namespace that is still there is never reported as stopped.
 EOF2
 }
 cmd_stop() {
@@ -96,7 +128,7 @@ cmd_stop() {
 	while [ $# -gt 0 ]; do case $1 in -h|--help) usage_stop; return 0;; --force) force=1; shift;; *) arg=$1; shift;; esac; done
 	need_root; a=$(targets "$arg"); [ -n "$a" ] || die "no profiles"
 	if [ "$force" != 1 ]; then for n in $a; do profile_busy "$n"; case $? in
-		0) die "$n is logged in (or has a running user manager). Log them out first, or use --force to end their session.";;
+		0) die "$n is logged in (or has a running user manager). Log them out first, or use --force to end their session. $(busy_hint "$n")";;
 		1) ;;
 		*) die "could not tell whether $n is logged in (loginctl or systemctl did not answer), so nothing was stopped. Check that systemd-logind is running, or use --force.";;
 	esac; done; fi
@@ -211,7 +243,7 @@ cmd_remove() {
 }
 # ensure_logged_out N: dies unless the profile's user has no session and no user manager; a check that could not run is a refusal too
 ensure_logged_out() { profile_busy "$1"; case $? in
-	0) die "$P_LOGIN is logged in (or has a running user manager): log them out first.";;
+	0) die "$P_LOGIN is logged in (or has a running user manager): log them out first. $(busy_hint "$1")";;
 	1) ;;
 	*) die "could not tell whether $P_LOGIN is logged in (loginctl or systemctl did not answer), so nothing was removed. Check that systemd-logind is running and try again.";;
 	esac; }
