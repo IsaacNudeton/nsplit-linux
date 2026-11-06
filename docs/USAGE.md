@@ -28,12 +28,13 @@ do not weaken the check.
 ## Build the packaged snapshot
 
 This repository began as a single-commit snapshot of nsplit 0.1.0-13 and is now
-nsplit **0.1.0-16**. The reviewed runtime baseline, 0.1.0-12, is described in
+nsplit **0.1.0-17**. The reviewed runtime baseline, 0.1.0-12, is described in
 [VALIDATION.md](VALIDATION.md); the 0.1.0-13 package differed from it only by the added
 MIT license text, 0.1.0-14 adds the fixes for issues #1 to #3 (see
 [former known issues](VALIDATION.md#former-known-issues)), 0.1.0-15 the fixes for
-#7 and #8 (see [validation](VALIDATION.md#defects-7-and-8-fixed-in-010-15)), and 0.1.0-16 the
-fix for #10 (see [validation](VALIDATION.md#defect-10-fixed-in-010-16)).
+#7 and #8 (see [validation](VALIDATION.md#defects-7-and-8-fixed-in-010-15)), 0.1.0-16 the
+fixes for #9 and #10 (see [validation](VALIDATION.md#defect-10-fixed-in-010-16)), and 0.1.0-17 the
+fix for #17, the temporary files (see [validation](VALIDATION.md#issue-17-fixed-in-0110-17)).
 The following creates a source checkout on a new evaluation machine. For an
 existing development checkout, use that checkout rather than creating duplicates.
 
@@ -55,7 +56,7 @@ verification of an arbitrary downloaded archive.
 Install only the package you just built, in the evaluation VM:
 
 ```sh
-sudo pacman -U packaging/arch/nsplit-0.1.0-16-any.pkg.tar.zst
+sudo pacman -U packaging/arch/nsplit-0.1.0-17-any.pkg.tar.zst
 pacman -Q nsplit
 nsplit --version
 ```
@@ -116,6 +117,19 @@ administrator can switch it on; status reports that the same way.
 Enrollment still requires the Plasma login manager whichever mode you choose.
 Use an explicit generic hostname when you do not want the default machine-derived
 name to appear in the tailnet.
+
+### Interrupting `nsplit add`, and temporary files
+
+`nsplit add` changes many things and undoes all of them if a step or a check fails. Since 0.1.0-17 the same holds for an interrupt:
+the first Ctrl-C (`SIGINT`), `SIGTERM` or `SIGHUP` while it is applying changes is noted, the step in progress finishes (so that
+every change already has its undo registered), and the command then ends with status 130, 143 or 129 after undoing everything; it
+says so ("finishing the step in progress, then undoing"). A second signal ends it at once and still undoes what is registered by then.
+`SIGKILL` and a power loss cannot be handled. Outside an apply (a preview, `status`, `stop` and the rest) a signal ends the command as it
+always did.
+
+nsplit keeps no temporary file after it ends: the copies it makes for undo (and the generated login files and the sudoers check copy) are
+registered by their exact path when they are made and removed when the command ends; nothing else in the temporary directory is touched.
+They are made in `$TMPDIR` (`/tmp` when it is unset; `sudo` normally resets it).
 
 ### Reaching the namespace OpenSSH server over the profile's tailnet
 
