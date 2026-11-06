@@ -95,7 +95,7 @@ See [validation and limits](docs/VALIDATION.md) for exactly what was and was not
 
 ### Former known issues, fixed in this snapshot
 
-The focused test found three problems. Each is fixed in 0.1.0-14 (this snapshot is 0.1.0-16)
+The focused test found three problems. Each is fixed in 0.1.0-14 (this snapshot is 0.1.0-17)
 and its issue is closed. The fixes were tested off-host and in a disposable guest on the reviewed
 0.1.0-12 program files with the changed files copied over them. The 0.1.0-14 package built from
 this repository was later installed over 0.1.0-12 in a disposable guest for the Tailscale SSH test,
@@ -127,6 +127,15 @@ Fixed in 0.1.0-16 (tested off-host with controls and mutants, and in a disposabl
   What changed is that the mode now needs an explicit acknowledgement, says so in the preview, the final output and
   `nsplit status`, and `nsplit status` reads the node's real built-in SSH setting (Degraded when it is on although the
   profile says `none` or `openssh`). **The limitation itself remains:** nsplit cannot read or limit the tailnet policy.
+
+Fixed in 0.1.0-17 (tested off-host with controls and mutants, and in a disposable guest on the installed package; see
+[validation](docs/VALIDATION.md#issue-17-fixed-in-0110-17)):
+
+- [#17](https://github.com/IsaacNudeton/nsplit-linux/issues/17): a successful `nsplit add` or `nsplit remove` left the first-time copies it
+  keeps for undo in `/tmp` (`nsplit.XXXXXX`). Every temporary file is now registered by its exact path and removed when the command ends;
+  nothing else is ever removed. **Behaviour change:** while `nsplit add` applies changes, a first Ctrl-C, `SIGTERM` or `SIGHUP`
+  now finishes the step in progress and then undoes everything the command did (before, an interrupted add was not undone at all); a
+  second signal ends the command at once and still undoes what is registered.
 
 Enrollment changes login/network configuration and requires an administrator.
 The target account must be logged out, with no running user manager; programs

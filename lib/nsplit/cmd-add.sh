@@ -225,32 +225,33 @@ only_marked_added() { diff <(grep -v '# nsplit:' "$1") <(grep -v '# nsplit:' "$2
 
 # pam_install PROFILE...: (re)write the gated files for exactly these profiles (none = remove the gate). plasmalogin is a copy of the vendor file; login is edited in place with a first-time backup.
 pam_install() {
-	local t; t=$(mktemp -d "${TMPDIR:-/tmp}/nsplit.XXXXXX")
-	pam_generate "$PAMVENDOR/plasmalogin" "$ANCH_PL" "$@" > "$t/plasmalogin" || { rm -rf "$t"; die "cannot generate the graphical login file (unexpected vendor file layout)"; }
-	pam_generate "$PAMDIR/login" "$ANCH_LG" "$@" > "$t/login" || { rm -rf "$t"; die "cannot generate the console login file (unexpected layout)"; }
-	only_marked_added "$PAMVENDOR/plasmalogin" "$t/plasmalogin" && only_marked_added "$PAMDIR/login" "$t/login" || { rm -rf "$t"; die "generated login files differ from the originals by more than the gate lines"; }
+	local gpl glg gkept
+	tmp_new gpl; tmp_new glg
+	pam_generate "$PAMVENDOR/plasmalogin" "$ANCH_PL" "$@" > "$gpl" || die "cannot generate the graphical login file (unexpected vendor file layout)"
+	pam_generate "$PAMDIR/login" "$ANCH_LG" "$@" > "$glg" || die "cannot generate the console login file (unexpected layout)"
+	only_marked_added "$PAMVENDOR/plasmalogin" "$gpl" && only_marked_added "$PAMDIR/login" "$glg" || die "generated login files differ from the originals by more than the gate lines"
 	OWNER=_shared
 	if [ "$#" -eq 0 ]; then
-		if [ "$DRY" = 1 ]; then printf '    would remove the gate lines from %s and %s\n' "$PAMDIR/plasmalogin" "$PAMDIR/login"; rm -rf "$t"; return 0; fi
+		if [ "$DRY" = 1 ]; then printf '    would remove the gate lines from %s and %s\n' "$PAMDIR/plasmalogin" "$PAMDIR/login"; tmp_drop "$gpl"; tmp_drop "$glg"; return 0; fi
 		if [ -e "$PAMDIR/plasmalogin" ] && grep -q '# nsplit:' "$PAMDIR/plasmalogin"; then
 			if [ "$(own_sha _shared "$PAMDIR/plasmalogin")" = "$(sha "$PAMDIR/plasmalogin")" ]; then rm -f "$PAMDIR/plasmalogin"
-			else grep -v '# nsplit:' "$PAMDIR/plasmalogin" > "$t/pl.kept" && cat "$t/pl.kept" > "$PAMDIR/plasmalogin"   # changed by hand: only nsplit's own lines come out
+			else tmp_new gkept; grep -v '# nsplit:' "$PAMDIR/plasmalogin" > "$gkept" && cat "$gkept" > "$PAMDIR/plasmalogin"   # changed by hand: only nsplit's own lines come out
 				warn "kept $PAMDIR/plasmalogin: it was changed after nsplit wrote it; only nsplit's gate lines were taken out of it"; fi
 			own_forget _shared "$PAMDIR/plasmalogin"; fi
-	else put "$PAMDIR/plasmalogin" 644 < "$t/plasmalogin"; fi
-	pam_edit_login "$t/login"
-	rm -rf "$t"
+	else put "$PAMDIR/plasmalogin" 644 < "$gpl"; fi
+	pam_edit_login "$glg"
+	tmp_drop "$gpl"; tmp_drop "$glg"
 }
 pam_edit_login() {
 	local new=$1 prev
 	if [ "$DRY" = 1 ]; then printf '    would edit: %s (gate lines only; first-time backup in %s/pam/login.orig)\n' "$PAMDIR/login" "$BKDIR"; return 0; fi
 	if [ ! -e "$BKDIR/pam/login.orig" ]; then   # first edit ever: keep the original; if this run fails the backup goes away with the rest
 		undo_push put_remove _shared "$BKDIR/pam/login.orig"; mkdir -p "$BKDIR/pam"; cp -p "$PAMDIR/login" "$BKDIR/pam/login.orig"; fi
-	prev=$(mktemp "${TMPDIR:-/tmp}/nsplit.XXXXXX"); cp -p "$PAMDIR/login" "$prev"
-	install -m 644 "$new" "$PAMDIR/login.nsplit-new" && mv -f "$PAMDIR/login.nsplit-new" "$PAMDIR/login"
-	undo_push pam_login_restore "$prev"
+	tmp_new prev; cp -p "$PAMDIR/login" "$prev"   # the rollback copy: dropped by pam_login_restore, or swept at exit when nothing needed to be undone
+	undo_push pam_login_restore "$prev"           # registered before the edit: restoring an unchanged file does nothing
+	install -m 644 "$new" "$PAMDIR/login.nsplit-new" && { tmp_adopt "$PAMDIR/login.nsplit-new"; mv -f "$PAMDIR/login.nsplit-new" "$PAMDIR/login"; }
 }
-pam_login_restore() { cat "$1" > "$PAMDIR/login"; rm -f "$1"; }
+pam_login_restore() { cat "$1" > "$PAMDIR/login"; tmp_drop "$1"; }
 
 # ---- the steps ------------------------------------------------------------------------------------------------------------
 fw_refresh() { # make the firewall reflect the profiles that exist now: none = stop and disable it; otherwise start it or reload it
@@ -264,7 +265,8 @@ guard_refresh() { # load the guard file as it is now (atomic reload), or remove 
 
 step_files() {
 	say "  - profile configuration"
-	[ "$DRY" = 1 ] || undo_push fw_refresh_after_env_removed   # pushed first = runs last: after the profile files are gone
+	[ "$DRY" = 1 ] || undo_push rmdir_conf_dirs   # pushed first of all = runs last: the configuration directories this run made, once they are empty
+	[ "$DRY" = 1 ] || undo_push fw_refresh_after_env_removed   # runs after the profile files are gone
 	OWNER=_shared; [ -r "$CONF" ] || { put "$CONF" 644 < <(conf_text); }
 	OWNER=$NAME
 	put "$PROFDIR/$NAME.env" 644 < <(env_text)
@@ -273,6 +275,7 @@ step_files() {
 	OWNER=_shared; put "$FWSET" 644 < <(fw_set_text $(profile_names) "$NAME")
 }
 fw_refresh_after_env_removed() { fw_refresh; guard_refresh; }
+rmdir_conf_dirs() { rmdir "$ETC/ssh" "$ETC/dns" "$PROFDIR" 2>/dev/null; rmdir "$ETC" 2>/dev/null; true; }   # the same directories `nsplit remove` takes away when it is the last profile; rmdir only ever removes an empty one
 
 step_guard() {
 	say "  - host-namespace egress guard for uid $UIDN"
@@ -311,7 +314,7 @@ step_start() {
 	[ "$DRY" = 1 ] || undo_push $SYSTEMCTL disable --now "nsplit-tailscaled@$NAME.service"
 	run $SYSTEMCTL enable --now "nsplit-tailscaled@$NAME.service" || die "the Tailscale daemon for $NAME did not start (see: journalctl -u nsplit-tailscaled@$NAME)"
 	[ "$DRY" = 1 ] && return 0
-	local i; for i in $(seq 30); do [ -S "$(sock_of "$NAME")" ] && break; sleep 1; done
+	local i; for i in $(seq 30); do [ -S "$(sock_of "$NAME")" ] && break; intr_check; sleep 1; done
 	[ -S "$(sock_of "$NAME")" ] || die "the profile's Tailscale daemon did not come up (see: journalctl -u nsplit-tailscaled@$NAME)"
 }
 
@@ -329,8 +332,8 @@ step_ssh() {
 		undo_push put_remove "$NAME" "$d/ssh_host_ed25519_key"; undo_push put_remove "$NAME" "$d/ssh_host_ed25519_key.pub"
 	fi
 	/usr/bin/sshd -t -f "$d/sshd_config" || die "the generated sshd configuration does not parse"
+	undo_push $SYSTEMCTL disable --now "nsplit-sshd@$NAME.service"   # before the enable: `enable --now` can enable the unit and then fail to start it
 	$SYSTEMCTL enable --now "nsplit-sshd@$NAME.service" || die "the namespace sshd did not start"
-	undo_push $SYSTEMCTL disable --now "nsplit-sshd@$NAME.service"
 }
 
 step_placement() {
@@ -358,9 +361,9 @@ step_scoped() { # owner-managed only: the one sudo rule that lets the user run t
 	if [ ! -d "$SUDOERSDIR" ] || ! command -v "$VISUDO" >/dev/null 2>&1; then
 		warn "sudo is not set up here ($SUDOERSDIR or visudo is missing): $LOGIN cannot sign in without an administrator; run: sudo nsplit login $NAME"; return 0; fi
 	case $SCOPED in *[!A-Za-z0-9/._+-]*) warn "the install path of the helper ($SCOPED) has characters a sudo rule cannot carry exactly: $LOGIN cannot sign in without an administrator; run: sudo nsplit login $NAME"; return 0;; esac
-	local chk; chk=$(mktemp "${TMPDIR:-/tmp}/nsplit.XXXXXX"); sudoers_text > "$chk"   # checked BEFORE it is installed: a broken file in sudoers.d would break sudo for everyone
-	$VISUDO -c -f "$chk" >/dev/null 2>&1 || { rm -f "$chk"; die "the sudo rule nsplit generated is not valid sudoers syntax; nothing was installed"; }
-	rm -f "$chk"
+	local chk; tmp_new chk; sudoers_text > "$chk"   # checked BEFORE it is installed: a broken file in sudoers.d would break sudo for everyone
+	$VISUDO -c -f "$chk" >/dev/null 2>&1 || { tmp_drop "$chk"; die "the sudo rule nsplit generated is not valid sudoers syntax; nothing was installed"; }
+	tmp_drop "$chk"
 	OWNER=$NAME; put "$SUDOERSDIR/nsplit-$NAME" 440 < <(sudoers_text)
 	[ "$DRY" = 1 ] && return 0
 	$VISUDO -c -f "$SUDOERSDIR/nsplit-$NAME" >/dev/null 2>&1 || die "the installed sudo rule is not valid sudoers syntax"
@@ -377,9 +380,9 @@ except OSError as e: sys.exit(0 if e.errno==errno.ECONNREFUSED else 1)'
 as_user() { local u=$1 g; shift; g=$(id -g "$u"); setpriv --reuid="$UIDN" --regid="$g" --clear-groups "$@"; }
 add_checks() {
 	local fails=0 pass=0 o
-	okc() { pass=$((pass+1)); printf '    PASS  %s\n' "$*"; }
-	badc() { fails=$((fails+1)); printf '    FAIL  %s\n' "$*"; }
-	skipc() { printf '    SKIP  %s\n' "$*"; }
+	okc() { intr_check; pass=$((pass+1)); printf '    PASS  %s\n' "$*"; }
+	badc() { intr_check; fails=$((fails+1)); printf '    FAIL  %s\n' "$*"; }
+	skipc() { intr_check; printf '    SKIP  %s\n' "$*"; }
 	say "  checking:"
 	# the guard: exactly the expected uids and rules
 	o=$($NFT list table inet nsplit_uid 2>/dev/null)
@@ -424,7 +427,8 @@ add_checks() {
 
 # ---- the command ---------------------------------------------------------------------------------------------------------
 apply_all() {
-	step_files; step_guard; step_dbus; step_start; step_ssh; step_operator; step_scoped; step_placement; step_gate
+	# an interrupt that arrives during a step is acted on here, between steps, when every change so far has its undo registered
+	step_files; intr_check; step_guard; intr_check; step_dbus; intr_check; step_start; intr_check; step_ssh; intr_check; step_operator; intr_check; step_scoped; intr_check; step_placement; intr_check; step_gate; intr_check
 }
 
 cmd_add() {
@@ -463,7 +467,7 @@ cmd_add() {
 	fi
 	why=$(busy_reason) && { say "Nothing was changed."; die "$why"; }   # re-checked after the confirmation: it may have waited a long time
 	say; say "Applying:"
-	APPLYING=1; trap 'rc=$?; if [ $rc -ne 0 ] && [ "${APPLYING:-0}" = 1 ]; then rollback_all; fi' EXIT
+	APPLYING=1   # from here a failure or an interrupt undoes what was done (nsplit_atexit)
 	apply_all
 	if ! add_checks; then rollback_all; APPLYING=0; die "a check failed; everything this command did was undone"; fi
 	APPLYING=0

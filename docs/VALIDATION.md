@@ -18,7 +18,7 @@ The test environment was a disposable CachyOS guest using the documented
 systemd/Plasma-login-manager integration. Documentation-only changes do not
 extend the tested runtime scope.
 
-**This snapshot is 0.1.0-16.** 0.1.0-13 added the MIT license and its packaging only:
+**This snapshot is 0.1.0-17.** 0.1.0-13 added the MIT license and its packaging only:
 building both packages and comparing them showed the 25 installed program files
 byte-identical, in content and mode, to the reviewed 0.1.0-12 package, and the only added
 file was `/usr/share/licenses/nsplit/LICENSE`. **0.1.0-14 is different: it changes
@@ -29,6 +29,8 @@ packages showed 31 installed files, exactly those two different) to fix #7 and #
 [below](#defects-7-and-8-fixed-in-010-15).
 **0.1.0-16 changes four files relative to -15** (`cmd-ops.sh`, `cmd-add.sh`, `cmd-login.sh` and `cmd-status.sh`; comparing the two packages showed 31 installed files, exactly those four different): `cmd-ops.sh` for #10, see
 [below](#defect-10-fixed-in-010-16), and the other three for #9, see [below](#issue-9-acknowledgement-and-status-for---ssh-tailscale-0110-16).
+**0.1.0-17 changes three files relative to -16** (`bin/nsplit`, `cmd-add.sh` and `common.sh`; comparing the two packages showed 31 installed files, exactly those three different), for #17, see
+[below](#issue-17-fixed-in-0110-17).
 The guest tests of the fixes ran on the 0.1.0-12 baseline package, with the changed files
 copied over it (originals restored and checked afterwards). The -13 package was not installed.
 **The -14 package built from this repository (main 49ed71b) was installed over 0.1.0-12 in
@@ -323,6 +325,32 @@ rerun with the full line.) *Not tested:* Tailscale versions other than 1.104.2; 
 `--ssh tailscale`; an operator changed after enrolment; Tailscale's `check` mode and tags; `nsplit login` on a node
 that is already signed in with the built-in SSH switched on (login does not re-apply the setting).
 
+### Issue #17 (fixed in 0.1.0-17)
+
+**[#17](https://github.com/IsaacNudeton/nsplit-linux/issues/17) — temporary files left in `/tmp`.** *Found* during the 0.1.0-16 guest test: `put` and the console login edit make a first-time
+copy of every file they change, for undo, and only the undo ever removed it, so a successful `nsplit add` or `nsplit remove` left it behind (12 files after three adds and three removes in the
+guest; about 71,000 files, 280 MB, from the maintainer's own off-host test runs). *Fix:* every temporary file is made by one function (`mktemp`, then registered by its exact path) or, for the
+staging file beside a target that is renamed over it, registered when it is made. The exit handler undoes an interrupted add first (it still needs the copies) and then removes whatever is
+registered, once; a registered file is removed only while it is still the same regular file (device and inode), and nothing else is ever removed: no glob, no directory listing, no directory removed
+recursively (the generated login files are separate registered files instead of one directory). A subshell, which does not inherit the exit trap, removes what it registered when it ends. A failing
+`mktemp` stops the command with a message. *Behaviour change that came with it:* before, a `SIGTERM`/`SIGHUP` during `nsplit add` was **not undone at all** (a signal leaves `$?` at 0 in an exit trap
+under bash, so the undo condition was never met); now the first signal is noted, the step in progress finishes, the command ends (130/143/129) at the next safe point and undoes everything, and a second
+signal ends it at once. *Found by the first guest test of this fix:* with signals acted on at once, an interrupt that arrived between a change and the registration of its undo left that change
+behind (the enable symlink of the namespace sshd and an empty `/etc/nsplit/ssh`); that build was replaced. The undo of every change is now registered before the change (`put`, the console login edit, the
+namespace sshd: `systemctl enable --now` can enable a unit and then fail to start it, which used to leave it enabled), and a failed first add removes the configuration directories it made.
+*Tested:* off-host, 89 checks (`TMPDIR` a fresh directory, a logging `mktemp` as a positive control): a successful add and remove, a failed add that rolls back (bytes and modes restored), refusals before
+any change (nothing asked for), a dry run, `TERM`/`HUP`/`INT` at five points of an add (each ends in exactly the state before the add), two signals, a second signal during the undo, a unit that is enabled
+but fails to start, a first add that fails after its directory, keys and configuration exist, files that nsplit did not make (one named like its own) untouched, and the registry's own functions (unregistered
+files, a replaced file, a symlink, subshells, a missing or relative or spaced `TMPDIR`). The same checks fail 55 of 89 against the unfixed code, and 21 mutants that each remove one safeguard are each
+rejected by named checks (one of them was rerun alone after its patch text had gone stale). The existing suites pass unchanged: 403, 98, 46, 21, 30 and 38 checks. In the disposable guest on the real
+packages: with the 0.1.0-16 package an add and a remove leave 8 files in `/tmp` and a `SIGTERM` during an add exits 143 with the profile left half applied (no undo); on the 0.1.0-17 package, upgraded in place,
+the same add and remove leave nothing in `/tmp` (and nothing in a fresh `TMPDIR`; planted files, one named like nsplit's own, untouched), and `SIGTERM`, `SIGHUP` and `SIGINT` during an add exit 143, 129 and
+130 after "finishing the step in progress" and "undoing 16 step(s)" with the guest's whole recorded state (tree, content hashes, units, namespaces, firewall, accounts, links) identical to before. *Not
+tested:* `sudo -E` or any other way a caller's `TMPDIR` reaches a root run; a temporary directory that is not a tmpfs; two nsplit commands at once; the cleanup of the staging files after a failure between
+their creation and their rename (only the registry's behaviour is checked, no failure is injected there); the DNS repair's own retained backup directory (`dns-NAME.XXXXXX` under `/var/lib/nsplit`, kept on
+purpose when a repair cannot be rolled back) was not changed. One check of the guest baseline failed (the three original profiles read Degraded right after the guest booted, because its mount watcher is
+off and nothing had repaired their lost mounts yet, as in [#1](https://github.com/IsaacNudeton/nsplit-linux/issues/1)); they read as before in every later phase.
+
 ## Former known issues
 
 The focused test above, and a read-only inspection, found three problems. Each is fixed in
@@ -430,7 +458,7 @@ does not configure this.
 - The fixes of the three former issues were tested as changed files over the 0.1.0-12 baseline
   package; the 0.1.0-14 package built from this repository was exercised in the Tailscale SSH test, the
   0.1.0-15 package, upgraded in place from -14, for the fixes of #7 and #8 only, and the 0.1.0-16 package,
-  upgraded in place from -15, for the changes of #9 and #10 only. This documentation is
+  upgraded in place from -15, for the changes of #9 and #10 only, and the 0.1.0-17 package, upgraded in place from -16, for the change of #17 only. This documentation is
   not a claim that the package is ready for any particular deployment.
 - A fresh `nsplit add` on the final -12 guest package, a graphical desktop run on
   that package, or an installation on the real workstation was not demonstrated
