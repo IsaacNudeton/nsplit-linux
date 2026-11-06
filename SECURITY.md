@@ -19,7 +19,9 @@ universally sandboxed.
 server inside the profile namespace) and `--ssh tailscale` (Tailscale SSH on the
 profile's node) each had one focused guest test of a single profile. The host's own
 SSH server is unchanged and is not a way into a profile; the namespace OpenSSH server
-also listens on the profile's private link to the host, not only on its tailnet.
+also listens on the profile's private link to the host, not only on its tailnet. In the same way a service started
+inside a profile that listens on all addresses is reachable from the host's own processes over that link (the
+namespace firewall accepts the host's address), whoever the host process runs as.
 
 **`--ssh tailscale` does not carry the protections of `--ssh openssh`** ([#9](https://github.com/IsaacNudeton/nsplit-linux/issues/9)).
 Which local account a Tailscale SSH session becomes is decided by the SSH policy of the

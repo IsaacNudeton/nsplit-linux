@@ -59,7 +59,7 @@ Both options are reachable only by enrolling with that option.
 
 | Feature | In the code | Guest-validated |
 | --- | --- | --- |
-| `--ssh openssh`: a separate OpenSSH server in the profile namespace (`nsplit-sshd@PROFILE.service`) | Yes | **Partly.** One focused test (below). It is not part of the reviewed acceptance baseline. |
+| `--ssh openssh`: a separate OpenSSH server in the profile namespace (`nsplit-sshd@PROFILE.service`) | Yes | **Partly.** Two focused tests (below): over the profile's private link (2026-11-03), and over the profile's Tailscale address on a lab tailnet (2026-11-06). Neither is part of the reviewed acceptance baseline. |
 | `--ssh tailscale`: Tailscale SSH on the profile's node (`tailscale up --ssh`) | Yes | **Partly.** One focused test on a throwaway lab tailnet (below). It found that the tailnet policy, not nsplit, chooses the local account, and that the login gate is not in the paths these sessions use. Not part of the reviewed acceptance baseline. |
 
 ### Focused `--ssh openssh` test (2026-11-03)
@@ -91,9 +91,60 @@ guest was rebooted once. Observed:
   from the former known issues below and one ownership-list file whose bytes differ for a
   reason that was not established.
 
-Not covered by this test: `--ssh tailscale` (see the next section); a connection
-over the profile's tailnet; any Tailscale sign-in; a graphical session; `kill -9`; IPv6;
+Not covered by this test: `--ssh tailscale` (see the section after the next one); a connection
+over the profile's tailnet (the second test, next section, covers it); any Tailscale sign-in; a graphical session; `kill -9`; IPv6;
 more than one reboot or profile; a retest on the -13 or -14 package.
+
+### Focused `--ssh openssh` test over the profile's tailnet (2026-11-06, phase 1 of [#13](https://github.com/IsaacNudeton/nsplit-linux/issues/13))
+
+One throwaway owner-managed profile enrolled with `--ssh openssh` and signed in to the same throwaway lab tailnet as the
+Tailscale SSH test (headscale in the guest, nothing on the public internet), on the **0.1.0-16 package** upgraded in place
+from -15 in the disposable guest (OpenSSH 10.6, Tailscale 1.104.2). The client was ordinary OpenSSH (`ssh -i KEY
+USER@ADDRESS`, host key pinned) in the namespace of a second lab node, connecting to the profile's **Tailscale address**:
+not Tailscale SSH (the node's built-in SSH was off). One test key was authorized for the profile's user (their own
+`~/.ssh/authorized_keys`) and, as a control, for root, the administrator account and another enrolled user, so that only the
+server's own rules could keep those out; every refusal below was also tried against a plain OpenSSH server with permissive
+settings in the lab namespace, and what that server accepted shows the test could tell the difference.
+
+- **Login.** A command and an interactive login (terminal) as the profile's user worked. Each session ran in the
+  profile's network namespace, saw the profile's private `/etc/resolv.conf` and the profile daemon's `/run/tailscale` (its `tailscale`
+  CLI answered from the profile's node) and resolved names through the profile's resolver. The session had a logind session (PAM service
+  `sshd`, class `user`) and a runtime directory, and with a login held open the user's **user manager ran in the profile namespace**
+  (the placement drop-in applies to an ssh login).
+- **Refused.** Root, another enrolled user, the administrator account and a nonexistent user: `Permission denied (publickey)`, with the
+  server's own log lines `not allowed because not listed in AllowUsers` / `Invalid user` (the plain server accepted the same key for
+  root, the administrator and the other user). An unauthorised key for the profile's user. Password: the failure lists `publickey` only, while the
+  plain server's lists `publickey,password`; keyboard-interactive is not offered either.
+- **Forwarding.** `ssh -L`: the server refused the channel (`administratively prohibited`, in the client's log) and the tunnel carried
+  nothing (through the plain server it carried the far end's banner). `ssh -R`: `remote port forwarding failed`, exit 255 (the plain
+  server accepted it). Agent forwarding: no agent socket in the session (the plain server gave one). A client environment variable was not
+  set in the session (the plain server accepted it).
+- **A user service.** A `systemd --user` service started from the session (`python3 -m http.server --bind 0.0.0.0`) ran in the profile's
+  namespace and answered over the profile's Tailscale address from the lab node; it listened inside the profile namespace, not on the host.
+  **Observed, not an expectation:** from the host's namespace it also answered over the profile's private veth address, because the in-namespace
+  firewall accepts the host's address: a service that listens on all addresses is reachable by any process on the host over that address, whatever
+  its user (`AllowUsers` protects only the sshd).
+- **Lifecycle.** With a session open, restarting the profile's Tailscale daemon left the session's client alive and a new login worked within
+  seconds; `nsplit stop --force` exited 0 and the server answered nobody while the profile was stopped, and after `nsplit start` a new login
+  worked and status said Ready; after a reboot the daemon, the server and the mount watcher came up by themselves (the watcher re-attached the
+  resolver mounts the boot had lost) and a login to the profile's Tailscale address worked, with the same refusal of root.
+- **Where it answers.** Over the profile's Tailscale address, and over the documented private veth address from the host. Not from another profile's
+  namespace (two tried), not from the lab at the veth address, and the host has no listener on port 22 (the host's own sshd stayed disabled and its
+  configuration unchanged).
+- **Removal** with an administrator-owned key file in `/etc/nsplit/ssh/PROFILE/`: the file was kept and reported, nothing else of the profile was
+  left, and the guest's state (tree, content hashes, units, namespaces, ufw rules, host nft rules compared as a set, host sshd, accounts, links,
+  trust anchors) equalled its state before the test. Two things were compared differently: the nft rules as a set of lines (a `stop --all` and `start --all` earlier in the run reloads the
+  firewall in the sorted order of the profile list), and the shared ownership list, whose bytes at the start were not kept: its four records were each checked against the file they name.
+
+**Operational observation.** OpenSSH 10 keeps a penalty per source address for failed logins and then resets new connections from that address for a while
+(the default `PerSourcePenalties`; nsplit's server configuration does not change it). The refused attempts of this test had to be spaced for that reason,
+and it applies to the profile's owner too: while a tailnet peer is failing logins from one address, other connections from that same address
+are reset until the penalty expires.
+
+Not covered: connecting by the node's MagicDNS name (the test used the address); more than one profile with OpenSSH at once; a key in the root-managed
+key file (used only for the removal check); Tailscale versions other than 1.104.2; other OpenSSH versions; a graphical session; IPv6; Tailscale's own control
+plane; and the headless placement that [#13](https://github.com/IsaacNudeton/nsplit-linux/issues/13) plans for a later phase (not implemented: enrollment still
+needs the Plasma login manager).
 
 ### Focused `--ssh tailscale` test (2026-11-05/06)
 
@@ -374,8 +425,8 @@ does not configure this.
 
 ## What is not claimed
 
-- `--ssh openssh` and `--ssh tailscale` were tested only as scoped above (one profile each, the
-  Tailscale test on a lab control server, not on Tailscale's).
+- `--ssh openssh` and `--ssh tailscale` were tested only as scoped above (one profile each for the
+  first tests, the tailnet tests on a lab control server, not on Tailscale's).
 - The fixes of the three former issues were tested as changed files over the 0.1.0-12 baseline
   package; the 0.1.0-14 package built from this repository was exercised in the Tailscale SSH test, the
   0.1.0-15 package, upgraded in place from -14, for the fixes of #7 and #8 only, and the 0.1.0-16 package,
