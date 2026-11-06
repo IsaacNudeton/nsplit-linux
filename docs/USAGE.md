@@ -28,14 +28,14 @@ do not weaken the check.
 ## Build the packaged snapshot
 
 This repository began as a single-commit snapshot of nsplit 0.1.0-13 and is now
-nsplit **0.2.0-alpha.2** (an alpha: see below). The reviewed runtime baseline, 0.1.0-12, is described in
+nsplit **0.2.0-alpha.3** (an alpha: see below). The reviewed runtime baseline, 0.1.0-12, is described in
 [VALIDATION.md](VALIDATION.md); the 0.1.0-13 package differed from it only by the added
 MIT license text, 0.1.0-14 adds the fixes for issues #1 to #3 (see
 [former known issues](VALIDATION.md#former-known-issues)), 0.1.0-15 the fixes for
 #7 and #8 (see [validation](VALIDATION.md#defects-7-and-8-fixed-in-010-15)), 0.1.0-16 the
 fixes for #9 and #10 (see [validation](VALIDATION.md#defect-10-fixed-in-010-16)), and 0.1.0-17 the
-fix for #17, the temporary files (see [validation](VALIDATION.md#issue-17-fixed-in-0110-17)). **0.2.0-alpha.1 adds headless profiles** and **0.2.0-alpha.2 the optional host-SSH denial**, new features that have had no independent review (see
-[validation](VALIDATION.md#headless-profiles-020-alpha1) and [validation](VALIDATION.md#host-ssh-denial-020-alpha2)); pacman versions cannot contain a hyphen, so the package is called `0.2.0alpha.2` (it sorts after 0.2.0alpha.1 and 0.1.0-17 and before 0.2.0).
+fix for #17, the temporary files (see [validation](VALIDATION.md#issue-17-fixed-in-0110-17)). **0.2.0-alpha.1 adds headless profiles**, **0.2.0-alpha.2 the optional host-SSH denial** and **0.2.0-alpha.3 the shared-GPU setup command**, new features that have had no independent review (see
+[validation](VALIDATION.md#headless-profiles-020-alpha1), [validation](VALIDATION.md#host-ssh-denial-020-alpha2) and [validation](VALIDATION.md#shared-gpu-setup-020-alpha3)); pacman versions cannot contain a hyphen, so the package is called `0.2.0alpha.3` (it sorts after 0.2.0alpha.2, 0.2.0alpha.1 and 0.1.0-17 and before 0.2.0).
 The following creates a source checkout on a new evaluation machine. For an
 existing development checkout, use that checkout rather than creating duplicates.
 
@@ -44,7 +44,7 @@ git clone https://github.com/IsaacNudeton/nsplit-linux.git
 cd nsplit-linux
 make check
 make dist
-cp nsplit-0.2.0alpha.2.tar.gz packaging/arch/
+cp nsplit-0.2.0alpha.3.tar.gz packaging/arch/
 (cd packaging/arch && makepkg --syncdeps)
 ```
 
@@ -57,7 +57,7 @@ verification of an arbitrary downloaded archive.
 Install only the package you just built, in the evaluation VM:
 
 ```sh
-sudo pacman -U packaging/arch/nsplit-0.2.0alpha.2-1-any.pkg.tar.zst
+sudo pacman -U packaging/arch/nsplit-0.2.0alpha.3-1-any.pkg.tar.zst
 pacman -Q nsplit
 nsplit --version
 ```
@@ -211,6 +211,27 @@ sudo nsplit host-ssh status                             # what is configured, an
   `/etc/ssh/sshd_config.d/50-nsplit-host-ssh.conf` and reloading sshd (`sudo systemctl reload sshd`) does the same.
 - **What it does not do:** it does not restrict any other way in (cron or `at` jobs, services running as the user, `su` or `sudo -u` from another account), it does not change the profile's own OpenSSH server
   (which never carries `DenyUsers` and does not include the host's drop-in directory), and it does not decide who the recovery account's owner is.
+
+## Setting up a shared machine in one command (`nsplit setup --preset shared-gpu`, alpha)
+
+For a computer that several people share for GPU work, one command does what `nsplit add USER --mode headless` (and, with a recovery account, `--host-ssh deny`) does, user after user: every user gets their own
+network namespace, Tailscale node and DNS, their own `systemctl --user` services run in it across logouts and reboots, and they are reached only through their own OpenSSH server over their own tailnet. It is a thin
+frontend: it runs those `nsplit add` commands, one separate process per user, and adds nothing of its own to what they do. It is an alpha feature (0.2.0-alpha.3): read what was and was not tested in
+[validation](VALIDATION.md#shared-gpu-setup-020-alpha3), and see [a walkthrough with real output](DEMO.md).
+
+```sh
+sudo nsplit setup --preset shared-gpu --dry-run alice bob                          # the plan and what each add would change; nothing is changed
+sudo nsplit setup --preset shared-gpu alice bob                                    # asks once, then sets both up (--yes skips the question)
+sudo nsplit setup --preset shared-gpu --recovery-user admin alice bob              # also refuses them at the host's own sshd (keep a session of admin open, see above)
+sudo nsplit setup --preset shared-gpu alice=gpu-alice bob                          # USER=NAME names the profile (as `nsplit add USER --name NAME`)
+```
+
+- **Checked before anything changes, for the whole call:** every user exists, is named once, is not logged in or running a user manager, is not already set up another way (a profile that is not a headless one is
+  refused with the way out; one that is already headless is skipped), the profile names are free, and, with `--recovery-user`, the recovery account and its held SSH session (the checks of `nsplit add --host-ssh deny`).
+  Then each add is previewed with `--dry-run`, so a problem that only the add can see (an address pool, a port, a unit, a name) is found before the first change.
+- **It stops at the first user whose add fails** (that add undoes itself) and says who is done, who failed and who was not attempted. Running the same command again skips the users that are already set up and finishes the rest.
+- **The GPU:** it reports which `/dev/nvidia*` and `/dev/dri` devices it sees and which of the users' groups (`video`, `render`) give device access, and changes none of it. It does not install or configure a driver or
+  CUDA, change device permissions or group membership, sign anybody in (an administrator runs `sudo nsplit login NAME` for each, and the user approves their own link) or put anybody's SSH key anywhere.
 
 ## Sign in and verify
 

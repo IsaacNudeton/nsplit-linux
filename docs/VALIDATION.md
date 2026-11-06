@@ -18,7 +18,7 @@ The test environment was a disposable CachyOS guest using the documented
 systemd/Plasma-login-manager integration. Documentation-only changes do not
 extend the tested runtime scope.
 
-**This snapshot is 0.2.0-alpha.2**, which adds [headless profiles](#headless-profiles-020-alpha1) (0.2.0-alpha.1) and the optional [host-SSH denial](#host-ssh-denial-020-alpha2) to 0.1.0-17 (everything below about 0.1.0-17 and earlier still describes the code those features share). 0.1.0-13 added the MIT license and its packaging only:
+**This snapshot is 0.2.0-alpha.3**, which adds [headless profiles](#headless-profiles-020-alpha1) (0.2.0-alpha.1), the optional [host-SSH denial](#host-ssh-denial-020-alpha2) (0.2.0-alpha.2) and the [shared-GPU setup command](#shared-gpu-setup-020-alpha3) to 0.1.0-17 (everything below about 0.1.0-17 and earlier still describes the code those features share). 0.1.0-13 added the MIT license and its packaging only:
 building both packages and comparing them showed the 25 installed program files
 byte-identical, in content and mode, to the reviewed 0.1.0-12 package, and the only added
 file was `/usr/share/licenses/nsplit/LICENSE`. **0.1.0-14 is different: it changes
@@ -33,7 +33,8 @@ packages showed 31 installed files, exactly those two different) to fix #7 and #
 [below](#issue-17-fixed-in-0110-17).
 **0.2.0-alpha.1 changes four files relative to -17** (`cmd-add.sh`, `cmd-ops.sh`, `cmd-status.sh` and `common.sh`, which also carries the version string; comparing the two packages showed 31 installed files, exactly those four different, with the same modes), see
 [below](#headless-profiles-020-alpha1). **0.2.0-alpha.2 adds one file and changes five relative to alpha.1** (`cmd-hostssh.sh` is new; `bin/nsplit`, `cmd-add.sh`, `cmd-ops.sh`, `cmd-status.sh` and `common.sh` changed), see
-[below](#host-ssh-denial-020-alpha2).
+[below](#host-ssh-denial-020-alpha2). **0.2.0-alpha.3 adds one file and changes two relative to alpha.2** (`cmd-setup.sh` is new; `bin/nsplit` and `common.sh` changed), see
+[below](#shared-gpu-setup-020-alpha3).
 The guest tests of the fixes ran on the 0.1.0-12 baseline package, with the changed files
 copied over it (originals restored and checked afterwards). The -13 package was not installed.
 **The -14 package built from this repository (main 49ed71b) was installed over 0.1.0-12 in
@@ -433,6 +434,30 @@ differed by exactly the mount watcher and the host sshd that the test had enable
 deleting the drop-in and reloading by hand (the held session, `allow` and removal were each shown to hand host SSH back), more than two enrolled users in the guest, ways in other than the host's `sshd` (cron or `at` jobs, services
 running as the user, `su` or `sudo -u`), a real workstation, and independent review.
 
+### Shared-GPU setup (0.2.0-alpha.3)
+
+**[#13](https://github.com/IsaacNudeton/nsplit-linux/issues/13), the shared-GPU frontend: `nsplit setup --preset shared-gpu [--recovery-user ADMIN] USER[=NAME]...`.** *What it is:* a thin command that runs `nsplit add USER [--name NAME] --mode headless
+[--host-ssh deny --recovery-user ADMIN]` for each user in turn, each as a separate process, so that add, remove and status behave exactly as before; it checks the whole call before the first change (every user exists, is named once, is not
+logged in, is not already set up another way, the profile names are free, the recovery account and its held session), previews each add with `--dry-run`, stops at the first failure and says who is done, who failed and who was not attempted, and
+reports what it sees of the GPU without changing any of it. Usage is in [Usage](USAGE.md#setting-up-a-shared-machine-in-one-command-nsplit-setup---preset-shared-gpu-alpha); [a walkthrough with real output](DEMO.md) comes from the same guest.
+*Tested off-host:* 35 checks (`run-checks-setup.sh`): the arguments and refusals (no or another preset, no user, a user that does not exist, named twice, logged in, a desktop profile, a profile name held by another user or used twice or starting with a
+dash, an invalid name refused by the add's own preview), the preview (nothing changes; the plan; what it sees of the GPU), **the result of setting up two users equal, file for file and unit state for unit state, to two direct `nsplit add --mode
+headless` commands** (compared across two boxes with the box path normalised and the random host keys left out, with a planted-change control), a failure at the second of three users (the first stays complete, the second left nothing, the third was never
+started, the same command run again finishes), and `--recovery-user` (refused up front for the whole call without a held session, for a recovery account that does not exist or is one of the users; with a session, one aggregate drop-in for both). The two
+enrolled users are the real accounts of the machine running the checks, given profile names of their own (`USER=NAME`), because the helpers read accounts with a fixed `PATH` and the add checks the real machine's interfaces and state directories; a synthetic
+account only goes through the preflight and the preview. The same checks fail 31 of 35 against the tree without the command, and the 20 mutants that each remove one safeguard are each rejected by named checks (one survived a first pass because the add also
+refuses a nonexistent user in similar words: the check was sharpened and the mutant rerun; one was rerun after its patch text went stale). The older suites pass unchanged on the same tree: 403, 98, 46, 21, 30, 38, 89, 86 and 79 checks.
+*Tested in the disposable guest,* on the real package `nsplit-0.2.0alpha.3-1` (sha256 `387d8d695c9d07f25ba637c02a7d27694830bf7c8ffc900768bd084c96a4fa7e`, installed in place over 0.1.0-17, with the same throwaway lab control server and
+method as above): with an authenticated recovery session held, a dry run (exit 0, the plan for both users, the guest's state identical), a call refused up front because one user does not exist (nothing changed, the other user untouched), then the real
+`nsplit setup --preset shared-gpu --recovery-user ADMIN` for two users in one command: done for both, two different namespaces (neither the host's), one aggregate drop-in naming both, sshd reloaded and not restarted, the held session alive, no group of
+the users changed; both signed in and Ready; both refused at the host's sshd with sshd's own log line, the recovery account let in, each user reached over their own tailnet as themselves inside their own namespace through their own PAM service; **one real
+reboot** with both profiles in place (the drop-in byte for byte, both refused, both Ready again on their own, both reached again); the removals one after the other (the list shrinks, the last removal removes the drop-in, host SSH comes back for each);
+and the guest's recorded state identical to before. Two complete guest runs: the first passed everything but one wrong check of the test script (`sshd -T` prints one `DenyUsers` line per user), kept annotated; the second, on the final package: 78 checks,
+0 failed. The guest has no GPU, so only the "no devices seen" report was exercised.
+*Compared with 0.2.0-alpha.2,* the package has 33 installed files instead of 32: `cmd-setup.sh` is new, and `bin/nsplit` and `common.sh` changed.
+*Not tested:* a GPU of any kind, a driver, the device groups, or a workload; more than two users in one call in the guest (the off-host suite uses three names for the failure case); `--no-session-check` (only its refusal without `--recovery-user` is tested); a user who is already set up and skipped, in the
+guest (off-host only); an interrupt of the command itself (each add handles its own); a real workstation; and independent review.
+
 ## Former known issues
 
 The focused test above, and a read-only inspection, found three problems. Each is fixed in
@@ -540,7 +565,7 @@ does not configure this.
 - The fixes of the three former issues were tested as changed files over the 0.1.0-12 baseline
   package; the 0.1.0-14 package built from this repository was exercised in the Tailscale SSH test, the
   0.1.0-15 package, upgraded in place from -14, for the fixes of #7 and #8 only, and the 0.1.0-16 package,
-  upgraded in place from -15, for the changes of #9 and #10 only, and the 0.1.0-17 package, upgraded in place from -16, for the change of #17 only, and the 0.2.0alpha.1 package, upgraded in place from -17, for headless profiles only, and the 0.2.0alpha.2 package, upgraded in place from -17, for the host-SSH denial (which includes the headless code) only. This documentation is
+  upgraded in place from -15, for the changes of #9 and #10 only, and the 0.1.0-17 package, upgraded in place from -16, for the change of #17 only, and the 0.2.0alpha.1 package, upgraded in place from -17, for headless profiles only, and the 0.2.0alpha.2 package, upgraded in place from -17, for the host-SSH denial (which includes the headless code) only, and the 0.2.0alpha.3 package, upgraded in place from -17, for the setup command (which includes both) only. This documentation is
   not a claim that the package is ready for any particular deployment.
 - A fresh `nsplit add` on the final -12 guest package, a graphical desktop run on
   that package, or an installation on the real workstation was not demonstrated
