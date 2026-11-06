@@ -28,11 +28,12 @@ do not weaken the check.
 ## Build the packaged snapshot
 
 This repository began as a single-commit snapshot of nsplit 0.1.0-13 and is now
-nsplit **0.1.0-15**. The reviewed runtime baseline, 0.1.0-12, is described in
+nsplit **0.1.0-16**. The reviewed runtime baseline, 0.1.0-12, is described in
 [VALIDATION.md](VALIDATION.md); the 0.1.0-13 package differed from it only by the added
 MIT license text, 0.1.0-14 adds the fixes for issues #1 to #3 (see
-[former known issues](VALIDATION.md#former-known-issues)), and 0.1.0-15 the fixes for
-#7 and #8 (see [validation](VALIDATION.md#defects-7-and-8-fixed-in-010-15)).
+[former known issues](VALIDATION.md#former-known-issues)), 0.1.0-15 the fixes for
+#7 and #8 (see [validation](VALIDATION.md#defects-7-and-8-fixed-in-010-15)), and 0.1.0-16 the
+fix for #10 (see [validation](VALIDATION.md#defect-10-fixed-in-010-16)).
 The following creates a source checkout on a new evaluation machine. For an
 existing development checkout, use that checkout rather than creating duplicates.
 
@@ -54,7 +55,7 @@ verification of an arbitrary downloaded archive.
 Install only the package you just built, in the evaluation VM:
 
 ```sh
-sudo pacman -U packaging/arch/nsplit-0.1.0-15-any.pkg.tar.zst
+sudo pacman -U packaging/arch/nsplit-0.1.0-16-any.pkg.tar.zst
 pacman -Q nsplit
 nsplit --version
 ```
@@ -148,7 +149,7 @@ showing the reason. The console path has different placement behavior; see
 | `sudo nsplit run demo -- COMMAND...` | Run a command as the profile user in its managed network/resolver view |
 | `nsplit ts demo status` | Address the profile's Tailscale socket, subject to its operator/access policy |
 | `sudo nsplit start demo` | Start managed networking; selectively restart a daemon whose current socket protections need repair |
-| `sudo nsplit stop demo` | Stop managed networking; refuses a busy/unknown user unless explicitly forced |
+| `sudo nsplit stop demo` | Stop managed networking; refuses a busy/unknown user unless explicitly forced. Reports "stopped" only after checking that every unit is down and the namespace is gone |
 | `nsplit uplinks` | Show configured and discovered physical uplinks |
 | `sudo nsplit uplinks --set "IFACE IFACE"` | Set existing uplinks and reload rules; substitute actual interface names. The ufw route rules of an uplink that leaves the list are deleted first; if that fails nothing is changed |
 | `sudo nsplit reload` | Reapply managed firewall/forwarding configuration while the firewall is running |
@@ -157,6 +158,20 @@ showing the reason. The console path has different placement behavior; see
 Stopping a namespace ends processes inside it. Repairing an unsafe active socket
 can interrupt that profile's connections, including SSH. `start --all` and
 `stop --all` affect all profiles; they are not harmless diagnostic commands.
+
+**Stopping with a Tailscale SSH session open.** `nsplit stop` and `nsplit remove` refuse while the
+profile's user has a login session or a running user manager. A shell left behind by an abruptly
+closed Tailscale SSH connection counts: Tailscale 1.104.2 leaves the remote login shell running
+when the client dies. If nobody is really using the account, an administrator can end every
+process of that user with `loginctl terminate-user USER` (the refusal names it; nsplit never runs
+it) and then repeat the command. `nsplit stop --force` ends the session by stopping the profile.
+With a Tailscale SSH session open the profile's Tailscale daemon does not exit within systemd's
+stop time-out (10 s) and is killed, which leaves its unit `failed` (also on a node without nsplit).
+nsplit accepts that one state, and only that one, when systemctl succeeded, the unit's result is a
+time-out, no process of the unit is left, and the namespace and every other unit of the profile are
+down; it then clears the failed state, prints a warning that the stop was not graceful, and exits 0.
+A surviving process or namespace, any other failure, or a state it cannot read or clear is still
+reported as not stopped, exit 1.
 
 After a package upgrade, installing files alone does not repair an already-open
 socket or close existing clients. Schedule affected profile starts/restarts and
