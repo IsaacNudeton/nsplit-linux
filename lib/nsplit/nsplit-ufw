@@ -7,6 +7,11 @@ set -uo pipefail
 ETC=${NSPLIT_ETC:-/etc/nsplit}; PROF=$ETC/profiles; RULES=${NSPLIT_UFW_RULES:-/etc/ufw/user.rules}
 # shellcheck disable=SC1091
 . "$ETC/nsplit.conf"
+# `nsplit uplinks --set` names the uplinks that are being dropped, so that their rules are deleted while the list still has them (del only)
+if [ "${1:-}" = del ] && [ -n "${NSPLIT_UFW_UPLINKS:-}" ]; then
+	case $NSPLIT_UFW_UPLINKS in *[!A-Za-z0-9_.\ :-]*) echo "nsplit-ufw: NSPLIT_UFW_UPLINKS holds characters an interface name cannot have" >&2; exit 2;; esac
+	UPLINKS=$NSPLIT_UFW_UPLINKS
+fi
 # owned <vh> <uplink> <ip>: prints how many exact copies of that route rule are in the rules file; non-zero if the file could not be read
 owned() { [ -f "$RULES" ] && [ -r "$RULES" ] || return 2; awk -v t="### tuple ### route:allow any any 0.0.0.0/0 any $3 in_$1!out_$2" \
 	'index($0,t)==1 && (length($0)==length(t) || substr($0,length(t)+1,1)==" ") {c++} END{print c+0}' < "$RULES"; }

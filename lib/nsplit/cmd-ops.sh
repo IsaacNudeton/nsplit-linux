@@ -169,6 +169,7 @@ cmd_remove() {
 		unresolved+="login gate lines for $P_LOGIN: left in place because the placement drop-in is still there"$'\n'
 	fi
 	step "ufw route rules" "$LIB/nsplit-ufw" del "$n"
+	if [ -e "$VAR/scoped-$n.lock" ] || [ -L "$VAR/scoped-$n.lock" ]; then step "DNS lock file $VAR/scoped-$n.lock" remove_scoped_lock "$n"; fi
 	step "D-Bus policy" remove_owned_file "$n" "$DBUSDIR/nsplit-$n.conf"
 	# a key file nsplit never recorded (an administrator made it after this fix) is not in the ownership list at all: it stays, and is said to (looked at before the loop, which forgets a recorded one)
 	if [ -e "$keyfile" ] && [ -z "$(own_sha "$n" "$keyfile")" ]; then printf '  kept: %s (the administrator'"'"'s key file: left in place; not an error)\n' "$keyfile"; fi
@@ -227,6 +228,10 @@ remove_owned_file() { local o=$1 f=$2; [ -e "$f" ] || { own_forget "$o" "$f"; re
 		own_forget "$o" "$f"; rmdir_ours "$(dirname "$f")"; return 0
 	fi
 	warn "$f was changed after nsplit wrote it: not deleting it"; return 3; }
+# the profile's DNS step creates $VAR/scoped-NAME.lock and nothing records it, so only the exact kind of file the step makes (an empty regular file, one link) is removed
+remove_scoped_lock() { local l=$VAR/scoped-$1.lock
+	if [ -f "$l" ] && [ ! -L "$l" ] && [ ! -s "$l" ] && [ "$(stat -c %h "$l")" = 1 ]; then rm -f "$l"; [ ! -e "$l" ] || return 1; return 0; fi
+	warn "$l is not the empty lock file nsplit makes: not deleting it"; return 3; }
 refresh_shared() { # regenerate what is shared between profiles from the profiles that remain
 	local uids n; uids=$(for n in $(profile_names); do ( . "$PROFDIR/$n.env"; echo "$UIDN" ); done | sort -nu | tr '\n' ' ')
 	OWNER=_shared
@@ -246,8 +251,12 @@ EOF2
 cmd_uplinks() {
 	case ${1:-} in
 	-h|--help) usage_uplinks;;
-	--set) need_root; [ -r "$CONF" ] || die "nsplit is not set up yet (nsplit add USER)"; local u=${2:?--set needs a list} i; for i in $u; do [ -e "/sys/class/net/$i" ] || die "no such interface: $i"; done
+	--set) need_root; [ -r "$CONF" ] || die "nsplit is not set up yet (nsplit add USER)"; local u=${2:?--set needs a list} i old gone=""; for i in $u; do [ -e "/sys/class/net/$i" ] || die "no such interface: $i"; done
 		[ "$(sha "$CONF")" = "$(own_sha _shared "$CONF")" ] || die "$CONF was changed by hand; edit UPLINKS there and run: nsplit reload"
+		u=$(printf '%s\n' $u | tr '\n' ' '); u=${u% }
+		# the ufw route rules of an uplink that leaves the list can only be named while the list still has it, so they go first; if they cannot be removed nothing is changed and this can be run again
+		old=$(conf_get UPLINKS); for i in $old; do case " $u " in *" $i "*) ;; *) gone+="${gone:+ }$i";; esac; done
+		if [ -n "$gone" ]; then NSPLIT_UFW_UPLINKS=$gone "$LIB/nsplit-ufw" del || die "the ufw route rules of the uplinks being dropped ($gone) could not be removed, so the uplinks were not changed: fix what is listed above and run this again"; fi
 		sed -i "s|^UPLINKS=.*|UPLINKS=\"$u\"|" "$CONF"; own_record _shared "$CONF"; cmd_reload;;
 	"") say "uplinks: $(conf_get UPLINKS || echo '(not set up yet)')"; say "physical interfaces here: $(discover_uplinks)";;
 	*) die "usage: nsplit uplinks [--set \"IF IF\"]";;
