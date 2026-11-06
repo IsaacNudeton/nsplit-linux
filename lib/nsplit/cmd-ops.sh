@@ -7,9 +7,9 @@ targets() { # targets ARG -> profile names ("--all" = every profile)
 	resolve_profile "$1" || die "no nsplit profile '$1' (see: nsplit status)"; }
 # profile_busy N: is the profile's user in use? 0 = yes, 1 = not, 2 = could not tell; the callers treat 2 like 0.
 # A desktop profile counts a login session OR a running user manager. A headless profile's manager is meant to be running (lingering), so only a login session counts.
-profile_busy() { ( . "$PROFDIR/$1.env"; if [ "${MODE:-}" = headless ]; then user_sessions "$LOGIN" "$UIDN"; else user_busy "$LOGIN" "$UIDN"; fi ); }
+profile_busy() { ( rec_clean; . "$PROFDIR/$1.env"; if [ "${MODE:-}" = headless ]; then user_sessions "$LOGIN" "$UIDN"; else user_busy "$LOGIN" "$UIDN"; fi ); }
 # busy_what N: the words for what profile_busy found
-busy_what() { local m; m=$( . "$PROFDIR/$1.env"; printf %s "${MODE:-}" ); if [ "$m" = headless ]; then printf 'has a login session'; else printf 'is logged in (or has a running user manager)'; fi; }
+busy_what() { local m; m=$( rec_clean; . "$PROFDIR/$1.env"; printf %s "${MODE:-}" ); if [ "$m" = headless ]; then printf 'has a login session'; else printf 'is logged in (or has a running user manager)'; fi; }
 # profile_units N: the units one profile owns, in the order they are stopped (a headless profile's user manager is stopped before them: see stop_manager)
 profile_units() { printf 'nsplit-sshd@%s.service nsplit-dns@%s.service nsplit-tailscaled@%s.service nsplit-netns@%s.service' "$1" "$1" "$1" "$1"; }
 # manager_wait_down UID [TRIES]: 0 once user@UID.service is inactive or failed, 1 if it is still up or changing after TRIES seconds (default 30)
@@ -81,7 +81,7 @@ stop_profile() {
 	return 1
 }
 # busy_hint N: what to add to a refusal because the user is logged in: an abandoned shell counts as logged in, and the administrator can end it explicitly (nsplit never does)
-busy_hint() { local l m u ids; eval "$( . "$PROFDIR/$1.env"; printf 'l=%q m=%q u=%q' "$LOGIN" "${MODE:-}" "$UIDN" )"
+busy_hint() { local l m u ids; eval "$( rec_clean; . "$PROFDIR/$1.env"; printf 'l=%q m=%q u=%q' "$LOGIN" "${MODE:-}" "$UIDN" )"
 	if [ "$m" = headless ]; then
 		ids=$(user_session_ids "$l" "$u")
 		printf 'A login left behind by an abruptly closed connection (session state "closing", its processes still running) counts as logged in. Its logind session(s): %s. If nobody is really using the account, an administrator can end one with: loginctl terminate-session ID (and, if its processes survive that, loginctl kill-session ID --signal=KILL). `loginctl terminate-user %s` is not suggested for a headless profile: it would also end the lingering user manager. nsplit never runs any of these for you.' "${ids:-?}" "$l"
@@ -211,6 +211,7 @@ cmd_remove() {
 	say "nsplit remove: $n ($P_LOGIN, uid $P_UIDN)"
 	say "  will stop: nsplit-netns@$n nsplit-tailscaled@$n nsplit-dns@$n nsplit-sshd@$n (the firewall stays while other profiles remain)"
 	[ "$(profile_mode)" != headless ] || say "  headless profile: $P_LOGIN's user manager is stopped first and the lingering nsplit switched on for it is switched off again (refused while $P_LOGIN has a login session; the account and home stay)"
+	[ "${P_HOSTSSH:-}" != deny ] || say "  host-SSH policy: $P_LOGIN comes out of the host sshd's DenyUsers (the drop-in is rewritten, or removed when no profile has the policy left) and sshd is reloaded; $P_LOGIN may then use the host's sshd again"
 	say "  will remove: the placement drop-in, the login-gate lines for $P_LOGIN, the D-Bus policy, the uid-guard entry, the ufw route rules, and every file nsplit created for $n:"
 	keyfile=$ETC/ssh/$n/authorized_keys
 	own_paths "$n" | while IFS= read -r f; do
@@ -316,10 +317,11 @@ refresh_shared() { # regenerate what is shared between profiles from the profile
 	OWNER=_shared
 	if [ -z "$uids" ]; then   # the last profile is gone: nothing is left to protect or forward for (nsplit.conf is removed by the caller once the profile record is gone, see remove)
 		local rc=0; rm -f "$ETC/uid-guard.nft" "$FWSET"; own_forget _shared "$ETC/uid-guard.nft"; own_forget _shared "$FWSET"; guard_refresh || rc=1; fw_refresh || rc=1
+		hostssh_apply "" || rc=1   # no profile is left: no host-SSH policy either (the drop-in goes, sshd reloads)
 		return $rc; fi
 	# the firewall reads its profiles from $FWSET, not from the profile records, so a profile being removed (SKIP_PROFILE) is out of the ruleset the reload loads
 	# shellcheck disable=SC2086
-	put "$ETC/uid-guard.nft" 644 < <(guard_text $uids) && put "$FWSET" 644 < <(fw_set_text $(profile_names)) && guard_refresh && fw_refresh; }
+	put "$ETC/uid-guard.nft" 644 < <(guard_text $uids) && put "$FWSET" 644 < <(fw_set_text $(profile_names)) && guard_refresh && fw_refresh && hostssh_apply "$(hostssh_recovery || true)"; }   # the host-SSH drop-in is regenerated from the remaining records (none = removed)
 pam_remove_for() { local gone=$1; shift; pam_install "$@"; }
 
 usage_uplinks() { cat <<'EOF2'

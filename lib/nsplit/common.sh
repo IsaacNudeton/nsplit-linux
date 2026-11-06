@@ -12,6 +12,10 @@ VAR=${NSPLIT_VAR:-/var/lib/nsplit}
 OWNDIR=$VAR/owned          # one list per owner: "sha256  path" for every file nsplit created (removal deletes only unmodified files from here)
 BKDIR=$VAR/backup          # first-time backups of files nsplit edits in place
 STATEMARK=$VAR/node-state  # marker per profile: its Tailscale state directory was created by nsplit (kept on removal unless --purge)
+SSHD_BIN=${NSPLIT_SSHD_BIN:-/usr/bin/sshd}                # the host's own sshd (host-SSH denial only: the namespace sshd of a profile is never touched by it)
+SSHD_CONFIG=${NSPLIT_SSHD_CONFIG:-/etc/ssh/sshd_config}
+SSHD_DROPDIR=${NSPLIT_SSHD_DROPDIR:-/etc/ssh/sshd_config.d}
+SSHD_UNIT=${NSPLIT_SSHD_UNIT:-sshd.service}
 LINGERMARK=$VAR/linger     # marker per headless profile: nsplit switched lingering on for the profile's user (removal switches it off again, and only then)
 LINGERDIR=${NSPLIT_LINGER_DIR:-/var/lib/systemd/linger}   # where systemd-logind keeps one file per lingering user
 RUNDIR=${NSPLIT_RUN:-/run/nsplit}
@@ -153,8 +157,8 @@ put() {
 	install -m "$mode" "$new" "$path.nsplit-new" && { tmp_adopt "$path.nsplit-new"; mv -f "$path.nsplit-new" "$path"; }; tmp_drop "$new"
 	own_record "$OWNER" "$path"
 }
-# rmdir_ours DIR: remove DIR when it is empty, except a directory that belongs to another package and exists without nsplit (sudo's)
-rmdir_ours() { [ "$1" = "$SUDOERSDIR" ] || rmdir --ignore-fail-on-non-empty "$1" 2>/dev/null; return 0; }
+# rmdir_ours DIR: remove DIR when it is empty, except a directory that belongs to another package and exists without nsplit (sudo's, and the host sshd's drop-in directory)
+rmdir_ours() { [ "$1" = "$SUDOERSDIR" ] || [ "$1" = "$SSHD_DROPDIR" ] || rmdir --ignore-fail-on-non-empty "$1" 2>/dev/null; return 0; }
 put_remove() { rm -f "$2"; own_forget "$1" "$2"; rmdir_ours "$(dirname "$2")"; true; }
 put_restore() { cat "$3" > "$2" && own_record "$1" "$2"; tmp_drop "$3"; }
 
@@ -165,11 +169,15 @@ profile_names() { local f n; for f in "$PROFDIR"/*.env; do [ -e "$f" ] || contin
 # fw_set_text NAME...: the content of $FWSET for exactly those profiles (sorted, once each; nothing for none)
 fw_set_text() { [ $# -eq 0 ] || printf '%s\n' "$@" | sort -u; }
 profile_exists() { [ -r "$PROFDIR/$1.env" ]; }
+# rec_clean: forget, in the calling (sub)shell, every variable a profile record can set. Call it before sourcing a record. A record written before a field existed must read as "field absent", not as whatever the
+# running command holds in a variable of that name: an add in progress holds HOSTSSH=deny, and every older profile then read as "denied" (found in the guest: the three older profiles landed on the DenyUsers line);
+# MANAGED=owner of an add in progress would likewise read as the policy of an older record that says nothing.
+rec_clean() { unset NAME LOGIN UIDN NS VH VN HOST_IP NS_IP PLEN TS_IF TS_PORT TS_HOSTNAME SSH MANAGED MODE HOSTSSH HOSTSSH_RECOVERY; }
 # profile_load NAME: read the profile into P_* variables
 profile_load() {
 	profile_exists "$1" || return 1
 	# shellcheck disable=SC1090
-	eval "$( . "$PROFDIR/$1.env"; for v in NAME LOGIN UIDN NS VH VN HOST_IP NS_IP PLEN TS_IF TS_PORT TS_HOSTNAME SSH MANAGED MODE; do printf 'P_%s=%q\n' "$v" "${!v-}"; done )"
+	eval "$( rec_clean; . "$PROFDIR/$1.env"; for v in NAME LOGIN UIDN NS VH VN HOST_IP NS_IP PLEN TS_IF TS_PORT TS_HOSTNAME SSH MANAGED MODE HOSTSSH HOSTSSH_RECOVERY; do printf 'P_%s=%q\n' "$v" "${!v-}"; done )"
 }
 # profile_operator: the Tailscale operator this profile's enrolment calls for, printed (nothing = root only). Needs profile_load.
 # MANAGED=owner: the profile's user may run tailscale / nsplit login themselves. Anything else, INCLUDING a record that says nothing (written before the policy was recorded),

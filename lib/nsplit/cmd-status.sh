@@ -215,6 +215,17 @@ profile_status() {
 		*) chk UNKNOWN "uid guard could not be interpreted, so nothing is known about it: $GUARD_WHY"; unverified=1;;
 		esac
 	else chk UNKNOWN "uid guard (reading the firewall needs root)"; fi
+	if [ "${P_HOSTSSH:-}" = deny ]; then   # the optional host-SSH denial: configured, as nsplit wrote it, and what sshd -T says NOW (never claimed as enforced when it could not be read)
+		local he
+		if [ -e "$HOSTSSH_DROPIN" ] && [ "$(own_sha _shared "$HOSTSSH_DROPIN")" = "$(sha "$HOSTSSH_DROPIN")" ]; then chk PASS "host SSH denial: $HOSTSSH_DROPIN is exactly what nsplit wrote (recovery account ${P_HOSTSSH_RECOVERY:-?})"
+		else secfail="host SSH denial is configured for $P_LOGIN but $HOSTSSH_DROPIN is missing or was changed after nsplit wrote it, so the host's sshd may let $P_LOGIN in"; chk FAIL "$secfail"; fi
+		if is_admin; then
+			if he=$(hostssh_eff "$P_LOGIN"); then
+				if grep -qxF "$P_LOGIN" <<<"$(hostssh_words denyusers "$he")"; then chk PASS "host SSH denial: sshd -T lists $P_LOGIN in DenyUsers (the host's sshd, as configured now, refuses them)"
+				else [ -n "$secfail" ] || secfail="host SSH denial: sshd -T does NOT list $P_LOGIN in DenyUsers: the host's sshd would let them in"; chk FAIL "sshd -T does not list $P_LOGIN in DenyUsers (the host's sshd would let them in)"; fi
+			else chk UNKNOWN "host SSH denial: the effective sshd configuration for $P_LOGIN could not be read (sshd -T): not reported as enforced"; unverified=1; fi
+		else chk UNKNOWN "host SSH denial: what sshd -T says needs administrator rights (sudo nsplit status $n): not reported as enforced"; unverified=1; fi
+	fi
 	mgr=$(manager_pid "$P_UIDN")
 	if [ -z "$mgr" ]; then
 		if [ "$(profile_mode)" = headless ]; then chk FAIL "$P_LOGIN's user manager is not running (a headless profile's manager runs without a login; an administrator can start it: sudo nsplit start $n)"
