@@ -87,9 +87,17 @@ Useful enrollment options are `--name NAME`, `--hostname NAME`, `--root-managed`
 `--ssh none|tailscale|openssh`, and `--uplinks "IFACE IFACE"` for the first profile.
 Profile names are 1–12 lowercase letters/digits/underscores/hyphens and begin
 with a letter. `nsplit add --help` describes the options. SSH defaults to `none`.
-`--ssh openssh` had one focused guest test and `--ssh tailscale` has **not been
-validated in a guest** (see [validation](VALIDATION.md)); try both only on a
-disposable machine.
+`--ssh openssh` and `--ssh tailscale` each had one focused guest test (see
+[validation](VALIDATION.md)); try both only on a disposable machine.
+
+**Before using `--ssh tailscale`:** the profile's node is signed in with the user's own Tailscale
+account, so that account's SSH policy, not nsplit, decides which local accounts a session can
+become on this machine. In the test, a rule allowing non-root users reached another enrolled
+user and the administrator account, and a rule listing `root` gave a root session that can leave
+the profile namespace. `--ssh openssh` pins the server to the profile's own user instead. If you
+use `--ssh tailscale`, have the `users` list of that account's SSH rule name only the profile's
+own login (tested to restrict it), and accept that the profile user can switch Tailscale SSH on
+and off on their node and that nsplit's login gate is not part of these sessions.
 Enrollment still requires the Plasma login manager whichever mode you choose.
 Use an explicit generic hostname when you do not want the default machine-derived
 name to appear in the tailnet.

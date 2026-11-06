@@ -24,10 +24,12 @@ byte-identical, in content and mode, to the reviewed 0.1.0-12 package, and the o
 file was `/usr/share/licenses/nsplit/LICENSE`. **0.1.0-14 is different: it changes
 runtime code** to fix the three issues under [Former known issues](#former-known-issues)
 and adds one command, one helper and three systemd units for the mount watcher.
-The guest tests ran on the 0.1.0-12 baseline package, and the later fixes were tested by
-copying the changed files over that package (originals restored and checked afterwards).
-**Neither the -13 package nor the -14 package built from this repository was itself
-installed or run in the guest.**
+The guest tests of the fixes ran on the 0.1.0-12 baseline package, with the changed files
+copied over it (originals restored and checked afterwards). The -13 package was not installed.
+**The -14 package built from this repository (main 49ed71b) was installed over 0.1.0-12 in
+the guest for the [Tailscale SSH test](#focused---ssh-tailscale-test-2026-11-0506)**, where its
+in-place upgrade, the repair of mounts lost at a boot, removal and a reboot ran; the focused
+cases of the three former issues were not repeated on it.
 
 ## What the evidence supports
 
@@ -53,7 +55,7 @@ Both options are reachable only by enrolling with that option.
 | Feature | In the code | Guest-validated |
 | --- | --- | --- |
 | `--ssh openssh`: a separate OpenSSH server in the profile namespace (`nsplit-sshd@PROFILE.service`) | Yes | **Partly.** One focused test (below). It is not part of the reviewed acceptance baseline. |
-| `--ssh tailscale`: Tailscale SSH on the profile's node (`tailscale up --ssh`) | Yes | **No.** Off-host checks covered only the flag passed to `tailscale up`. No guest profile used the option and nothing connected through it. Whether such sessions pass the login-gate configuration is unknown. |
+| `--ssh tailscale`: Tailscale SSH on the profile's node (`tailscale up --ssh`) | Yes | **Partly.** One focused test on a throwaway lab tailnet (below). It found that the tailnet policy, not nsplit, chooses the local account, and that the login gate is not in the paths these sessions use. Not part of the reviewed acceptance baseline. |
 
 ### Focused `--ssh openssh` test (2026-11-03)
 
@@ -84,9 +86,77 @@ guest was rebooted once. Observed:
   from the former known issues below and one ownership-list file whose bytes differ for a
   reason that was not established.
 
-Not covered: `--ssh tailscale`; a connection over the profile's tailnet; any
-Tailscale sign-in; a graphical session; `kill -9`; IPv6; more than one reboot or
-profile; a retest on the -13 or -14 package.
+Not covered by this test: `--ssh tailscale` (see the next section); a connection
+over the profile's tailnet; any Tailscale sign-in; a graphical session; `kill -9`; IPv6;
+more than one reboot or profile; a retest on the -13 or -14 package.
+
+### Focused `--ssh tailscale` test (2026-11-05/06)
+
+One throwaway owner-managed profile enrolled with `--ssh tailscale` on the **0.1.0-14 package
+built from main 49ed71b**, installed with `pacman -U` over 0.1.0-12 in the disposable CachyOS
+guest (kernel 7.3, systemd 262, Tailscale 1.104.2, ufw active). The tailnet was a throwaway
+lab: a self-hosted **headscale 0.29.7** control server in the guest (TLS with a private CA the
+guest trusted for the test, embedded DERP relay), a second Tailscale node as the SSH client, and
+`nsplit uplinks` set to a veth that reaches only the lab, so nothing of the profile could reach
+the internet (checked with controls). No Tailscale account and no real tailnet were used; the
+sign-in used the flags `nsplit login` passes plus the lab server and a lab pre-auth key, so
+nsplit's own browser flow was not exercised. The lab policy's `ssh` rule allowed the owner's
+own nodes with the action `accept`, with the allowed local users varied (non-root users; also
+`root`; only the profile's own user).
+
+**What worked.** A client logged in through the profile's node as the profile's user in three
+shapes: a command without a terminal and a command with one (both started by the profile daemon
+through `su`), and an interactive login shell (started by `login` with PAM service `remote`,
+registered by logind as a user session). In every shape the session ran in the profile's
+network namespace, saw the profile's private `/etc/resolv.conf` and the profile daemon's
+`/run/tailscale`, and resolved names through the profile's resolver; the user manager started
+by an interactive login was placed in the profile namespace. Port 22 was not answered on the
+profile's host-side address (Tailscale SSH is served inside the daemon on the tailnet address
+only). A node of another lab user was refused by the policy. After `systemctl restart` of the
+profile's daemon with sessions open, the node
+was Running again within seconds without a new sign-in and a new session worked; the same after
+`nsplit stop --force` and `nsplit start`, and after a reboot (the daemon and the mount watcher
+came up by themselves, the watcher repaired the resolver mounts that the boot had lost, and a
+session saw the profile's namespace, resolver and socket). `nsplit stop` and `nsplit remove`
+refuse while the user has a session. The 0.1.0-14 in-place upgrade did not restart the running
+daemons, `nsplit status` reported the mounts the earlier version had lost at a reboot as Degraded,
+and `nsplit mounts repair` re-attached them without restarting anything.
+
+**What it found** (all in the profile's namespace unless stated):
+
+- **The tailnet policy chooses the local account ([#9](https://github.com/IsaacNudeton/nsplit-linux/issues/9)).** Under a rule allowing
+  `autogroup:nonroot` (the shape of Tailscale's documented default rule) the client logged in as
+  another enrolled profile user and as the guest's administrator account (group wheel). Under a
+  rule that also listed `root` a root session worked; it started in the profile namespace but
+  `nsenter -t 1 -n` returned the host's namespace, and it read a root-only file and listed every
+  profile record. A rule listing only the profile's own login restricted all of this. nsplit has
+  no equivalent of `--ssh openssh`'s `AllowUsers`; each profile is signed in with the user's own
+  account, so that account's owner writes the rule.
+- **The login gate does not cover these sessions.** Its lines are in `/etc/pam.d/login` and
+  `plasmalogin` only. With the placement drop-in removed (and no session or manager running
+  before), the gate script refused that state when run as the login stack runs it, but an
+  interactive Tailscale SSH login was accepted and `user@UID.service` started in the host's
+  network namespace and stayed there for later logins until the user was terminated. What such
+  a manager could reach was not measured.
+- **`--ssh none` is not enforced for an owner-managed profile.** The profile user, as the
+  node's operator, ran `tailscale set --ssh=false` and `--ssh=true` on their node and the
+  client was refused and then accepted. `--root-managed` was not tested.
+- **Two behaviours of Tailscale 1.104.2 itself ([#10](https://github.com/IsaacNudeton/nsplit-linux/issues/10)),** reproduced on a bare
+  `tailscaled --ssh` node with nothing of nsplit: a client killed abruptly leaves the remote
+  interactive login shell running (still there after 90 s, the user manager stays up), and
+  stopping the daemon with a session open waits for systemd's stop timeout (10 s here) and ends
+  in SIGKILL, so `nsplit stop --force` with an open session exits 1 although the profile is down.
+- **Two defects not specific to SSH:** changing the uplinks leaves ufw route rules for the
+  previous uplinks ([#7](https://github.com/IsaacNudeton/nsplit-linux/issues/7)); `nsplit remove` leaves `scoped-NAME.lock`
+  ([#8](https://github.com/IsaacNudeton/nsplit-linux/issues/8)).
+
+Not covered: Tailscale's own control plane and its SSH policy features (the `check`
+re-authentication mode, session recording, tags, grants), Tailscale versions other than
+1.104.2, `--root-managed` with `--ssh tailscale`, two profiles with SSH at once, a graphical
+session, IPv6, what an unplaced user manager could reach, nsplit's own interactive sign-in,
+and whether Tailscale's default policy for a new tailnet allows `root` (a policy that lists it
+was tested, not the default). The guest was left as it was before the test apart from the
+package upgrade.
 
 ## Former known issues
 
@@ -95,9 +165,9 @@ this snapshot (0.1.0-14) and its issue is closed. **How the fixes were tested:**
 with fake system commands (each check suite also run against a version without the change, or
 with one safeguard removed, to show that it can fail), and in the disposable guest on the
 0.1.0-12 baseline package with the changed files copied over it. The -14 package built from
-this repository was not itself installed or run in the guest, and no real workstation was part of
-this validation. The scope stated above is unchanged: `--ssh tailscale` is untested, and
-`--ssh openssh` only as scoped.
+this repository was later installed over -12 in the guest for the Tailscale SSH test (the focused
+cases below were not repeated on it), and no real workstation was part of this validation.
+`--ssh openssh` and `--ssh tailscale` were each tested only as scoped above.
 
 **[#1](https://github.com/IsaacNudeton/nsplit-linux/issues/1) — profile bind mounts
 detach (fixed; one limit).** *Found:* the profile services and the user manager bind the
@@ -190,10 +260,11 @@ does not configure this.
 
 ## What is not claimed
 
-- `--ssh tailscale` was not tested, and `--ssh openssh` only as scoped above.
-- The 0.1.0-14 package built from this repository was not installed or run in the guest; the fixes
-  were tested as changed files over the 0.1.0-12 baseline package. This documentation is not a claim
-  that the package is ready for any particular deployment.
+- `--ssh openssh` and `--ssh tailscale` were tested only as scoped above (one profile each, the
+  Tailscale test on a lab control server, not on Tailscale's).
+- The fixes of the three former issues were tested as changed files over the 0.1.0-12 baseline
+  package; the 0.1.0-14 package built from this repository was exercised only in the Tailscale SSH
+  test. This documentation is not a claim that the package is ready for any particular deployment.
 - A fresh `nsplit add` on the final -12 guest package, a graphical desktop run on
   that package, or an installation on the real workstation was not demonstrated
   by the final acceptance program. Earlier-version and controlled tests retain

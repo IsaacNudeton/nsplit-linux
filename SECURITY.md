@@ -16,11 +16,24 @@ sessions need explicit handling. Do not advertise every process of a user as
 universally sandboxed.
 
 **Remote shell options are only partly validated.** `--ssh openssh` (an OpenSSH
-server inside the profile namespace) had one focused guest test of a single
-profile; `--ssh tailscale` (Tailscale SSH on the profile's node) has not been
-tested in a guest. The host's own SSH server is unchanged and is not a way into a
-profile; the namespace OpenSSH server also listens on the profile's private link to
-the host, not only on its tailnet. See [validation](docs/VALIDATION.md).
+server inside the profile namespace) and `--ssh tailscale` (Tailscale SSH on the
+profile's node) each had one focused guest test of a single profile. The host's own
+SSH server is unchanged and is not a way into a profile; the namespace OpenSSH server
+also listens on the profile's private link to the host, not only on its tailnet.
+
+**`--ssh tailscale` does not carry the protections of `--ssh openssh`** ([#9](https://github.com/IsaacNudeton/nsplit-linux/issues/9)).
+Which local account a Tailscale SSH session becomes is decided by the SSH policy of the
+tailnet the profile is signed in to, which is the profile user's own account: in the test,
+a rule allowing non-root users reached another enrolled user and the administrator account
+(inside the profile's network namespace), and a rule that also listed `root` gave a root
+session that could leave that namespace and read root-only files. The PAM login gate
+(installed for `login` and `plasmalogin`) is not in the paths Tailscale SSH uses (`su`, and
+`login` with PAM service `remote`): with the placement removed, the gate script refused but
+a Tailscale SSH login was accepted and the user manager started in the host namespace. The
+profile user, as the node's operator, can switch Tailscale SSH on and off, so `--ssh none` does
+not prevent it on an owner-managed profile. Use `--ssh tailscale` only where the person who
+controls the profile's Tailscale account may be given a shell on this machine as any account
+their policy names. See [validation](docs/VALIDATION.md).
 
 **A running profile service can lose its view of the profile, for a short time.** The profile
 services and user manager get the profile's resolver file and Tailscale socket directory
