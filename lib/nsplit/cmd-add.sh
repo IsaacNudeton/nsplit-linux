@@ -32,6 +32,10 @@ usage: nsplit add USER [options]
   --uplinks "A B"      network interfaces their traffic may leave through (first profile only; default: every physical interface found)
   --root-managed       an administrator manages the node: the user may not run `tailscale` or `nsplit login` themselves (the default is owner-managed: the user may,
                        through ONE sudo rule written for them and this profile that allows exactly two fixed nsplit operations and nothing else; it is removed with the profile)
+  --host-ssh deny      OPTIONAL: also refuse this user at the host's own sshd (they keep their profile's OpenSSH over their tailnet; a shell from the host's sshd runs in the HOST network namespace).
+                       Needs --recovery-user. Only a drop-in in the host's sshd_config.d is written (the main file is never edited); see: nsplit host-ssh --help
+  --recovery-user ADMIN  the existing, non-enrolled account that keeps host SSH access (required with --host-ssh deny; keep an SSH session of it open while this runs)
+  --no-session-check   with --host-ssh deny: do not require that session (on your own responsibility)
   With --ssh none or openssh, Tailscale's built-in SSH server is only switched OFF when the node is signed in. On an owner-managed profile the user is the node's Tailscale operator
   and can switch it on later (tailscale set --ssh); `nsplit status` reads the node's real setting and reports a node that has it on although the profile says otherwise.
 EOF
@@ -67,6 +71,16 @@ add_preflight() {
 	[ -x /usr/bin/dnsmasq ] || problem "dnsmasq is not installed (it is the profile's private resolver)"
 	[ "$SSH" != openssh ] || { [ -x /usr/bin/sshd ] && command -v ssh-keygen >/dev/null || problem "--ssh openssh needs OpenSSH (sshd, ssh-keygen)"; }
 	[ "$SSH" != tailscale ] || [ "$ACK_TS" = 1 ] || problem "--ssh tailscale needs --accept-tailscale-ssh-risk (--yes does not stand in for it): with Tailscale's built-in SSH server the SSH rules of $LOGIN's tailnet policy choose the local account a login becomes (any account on this machine, including the administrator and root), nsplit cannot read or limit them, and its login gate does not cover these sessions. The recommended remote shell is --ssh openssh."
+	if [ "$HOSTSSH" = deny ]; then
+		local hp hu
+		[ -n "$RECOVERY" ] || problem "--host-ssh deny needs --recovery-user ADMIN: an existing, non-enrolled account that keeps host SSH access"
+		if [ -n "$RECOVERY" ]; then
+			# the users that would be denied: every profile that has the policy, and this one
+			# shellcheck disable=SC2046
+			while IFS= read -r hp; do [ -z "$hp" ] || problem "host SSH: $hp"; done < <(HOSTSSH_EXTRA=$LOGIN hostssh_preflight "$RECOVERY" $(hostssh_denied_users) "$LOGIN")
+			hostssh_has_session "$RECOVERY" || { [ "$NO_SESSION_CHECK" = 1 ] || { [ "$DRY_REQ" = 1 ] && HOSTSSH_NOTE="no SSH session of $RECOVERY is open: a real run would be refused until you log in as $RECOVERY over SSH in another terminal and keep it open" || problem "no authenticated SSH session of the recovery account $RECOVERY exists: log in as $RECOVERY over SSH in another terminal and keep that session open while the policy is applied (nsplit cannot prove the account still works; --no-session-check overrides this on your own responsibility)"; }; }
+		fi
+	fi
 	if [ "$MODE" = headless ]; then
 		[ "$SSH" = openssh ] || problem "--mode headless goes with --ssh openssh only (the namespace OpenSSH server is how a headless profile is reached, and Tailscale's built-in SSH stays off): this enrolment is --ssh $SSH"
 		[ -r "$PAMDIR/sshd" ] || [ -r "$PAMVENDOR/sshd" ] || problem "--mode headless needs the host's PAM service for sshd ($PAMDIR/sshd): the namespace OpenSSH server's own PAM service includes it and then adds the placement gate"
@@ -143,6 +157,7 @@ TS_HOSTNAME=$TS_HOSTNAME
 SSH=$SSH
 MANAGED=$MANAGED
 MODE=$MODE
+$( [ "$HOSTSSH" = deny ] && printf 'HOSTSSH=deny\nHOSTSSH_RECOVERY=%s' "$RECOVERY" )
 EOF
 }
 conf_text() { cat <<EOF
@@ -430,6 +445,15 @@ step_linger() {
 	manager_wait_up "$UIDN" "${NSPLIT_MANAGER_WAIT:-60}" || die "the user manager of $LOGIN did not start after lingering was switched on (see: journalctl -u user@$UIDN.service)"
 }
 
+# step_hostssh (--host-ssh deny only): after everything else, including lingering. The aggregate drop-in is regenerated from the records (this profile's is already written), validated, and sshd is reloaded.
+step_hostssh() {
+	[ "$HOSTSSH" = deny ] || return 0
+	say "  - host SSH: $LOGIN is refused at the host's own sshd (DenyUsers in $HOSTSSH_DROPIN); $RECOVERY keeps host SSH access; the profile's own OpenSSH over the tailnet is not affected"
+	HOSTSSH_EXTRA=$LOGIN
+	hostssh_apply "$RECOVERY" || die "the host-SSH policy could not be put in force (the previous policy is unchanged)"
+	HOSTSSH_EXTRA=
+}
+
 step_operator() { # the enrolment's policy, applied explicitly either way: owner-managed = the user is the node's operator, root-managed = nobody is
 	local want=""; [ "$MANAGED" = owner ] && want=$LOGIN
 	[ "$DRY" = 1 ] && { printf '    would run: tailscale (profile socket) set --operator=%s   (%s-managed)\n' "$want" "$MANAGED"; return 0; }
@@ -513,6 +537,13 @@ add_checks() {
 		o=$(node_ssh "$NAME")
 		case $o in off) okc "built-in Tailscale SSH is off on the node";; on) badc "built-in Tailscale SSH is ON for the node of a headless profile";; *) skipc "built-in Tailscale SSH setting (the node's preferences could not be read)";; esac
 	fi
+	if [ "$HOSTSSH" = deny ]; then
+		local hp nseff
+		hp=$(hostssh_verify "$RECOVERY" $(hostssh_denied_users))
+		[ -z "$hp" ] && okc "the host's sshd (sshd -t, sshd -T) refuses $LOGIN and still lets $RECOVERY in" || badc "host SSH: $(tr '\n' ';' <<<"$hp")"
+		nseff=$(/usr/bin/sshd -T -f "$ETC/ssh/$NAME/sshd_config" 2>/dev/null)
+		if grep -qi '^denyusers' <<<"$nseff"; then badc "the profile's own namespace sshd carries DenyUsers"; else okc "the profile's own namespace sshd configuration is untouched by the host-SSH policy (no DenyUsers there)"; fi
+	fi
 	printf '  %s passed, %s failed\n' "$pass" "$fails"
 	[ $fails = 0 ]
 }
@@ -520,16 +551,19 @@ add_checks() {
 # ---- the command ---------------------------------------------------------------------------------------------------------
 apply_all() {
 	# an interrupt that arrives during a step is acted on here, between steps, when every change so far has its undo registered
-	step_files; intr_check; step_guard; intr_check; step_dbus; intr_check; step_start; intr_check; step_ssh; intr_check; step_operator; intr_check; step_scoped; intr_check; step_placement; intr_check; step_gate; intr_check; step_linger; intr_check
+	step_files; intr_check; step_guard; intr_check; step_dbus; intr_check; step_start; intr_check; step_ssh; intr_check; step_operator; intr_check; step_scoped; intr_check; step_placement; intr_check; step_gate; intr_check; step_linger; intr_check; step_hostssh; intr_check
 }
 
 cmd_add() {
 	local yes=0 ssh_arg="" ans why
-	DRY_REQ=0; BUSY_NOTE=""; MANAGED=owner; MARK_MADE=0; LOGIN=""; NAME=""; SSH=none; HOSTNAME_ARG=""; UPLINKS_ARG=""; ACK_TS=0; MODE=desktop
+	DRY_REQ=0; BUSY_NOTE=""; MANAGED=owner; MARK_MADE=0; LOGIN=""; NAME=""; SSH=none; HOSTNAME_ARG=""; UPLINKS_ARG=""; ACK_TS=0; MODE=desktop; HOSTSSH=""; RECOVERY=""; NO_SESSION_CHECK=0
 	while [ $# -gt 0 ]; do case $1 in
 		-h|--help) usage_add; return 0;;
 		--dry-run) DRY_REQ=1; shift;; --yes|-y) yes=1; shift;;
 		--name) NAME=${2:?--name needs a value}; shift 2;;
+		--host-ssh) HOSTSSH=${2:?--host-ssh needs deny}; shift 2;;
+		--recovery-user) RECOVERY=${2:?--recovery-user needs an account name}; shift 2;;
+		--no-session-check) NO_SESSION_CHECK=1; shift;;
 		--mode) MODE=${2:?--mode needs desktop|headless}; shift 2;;
 		--mode=*) MODE=${1#--mode=}; shift;;
 		--ssh) ssh_arg=${2:?--ssh needs none|tailscale|openssh}; shift 2;;
@@ -542,6 +576,8 @@ cmd_add() {
 	esac; done
 	[ -n "$LOGIN" ] || { usage_add >&2; exit 2; }
 	case $MODE in desktop|headless) ;; *) die "--mode must be desktop or headless";; esac
+	case $HOSTSSH in ""|deny) ;; *) die "--host-ssh must be deny (the default is no host-SSH policy)";; esac
+	{ [ -z "$RECOVERY" ] || [ "$HOSTSSH" = deny ]; } || die "--recovery-user only goes with --host-ssh deny"
 	if [ "$MODE" = headless ]; then MANAGED=root; [ -n "$ssh_arg" ] || ssh_arg=openssh; fi   # a headless profile is always root-managed and reached through the namespace OpenSSH server
 	[ -z "$ssh_arg" ] || SSH=$ssh_arg
 	case $SSH in none|tailscale|openssh) ;; *) die "--ssh must be none, tailscale or openssh";; esac
@@ -551,6 +587,7 @@ cmd_add() {
 	say "nsplit add: $LOGIN$( [ "$NAME" != "$LOGIN" ] && echo " (profile $NAME)" )"
 	add_preflight || { say "Nothing was changed."; exit 1; }
 	[ -z "$BUSY_NOTE" ] || info "NOTE: a real run would be refused right now: $BUSY_NOTE"
+	[ -z "${HOSTSSH_NOTE:-}" ] || info "NOTE: $HOSTSSH_NOTE"
 	say "  uid $UIDN   namespace $NS   link $HOST_IP <-> $NS_IP   node name $TS_HOSTNAME   uplinks: $UPLINKS_USED   ssh: $SSH   management: $MANAGED   mode: $MODE"
 	say "  LIMIT: only logins and user managers are checked. Programs of $LOGIN outside any session (cron/at jobs, system services running as uid $UIDN, sudo -u or su from another account) are not detected: they lose their host network when the guard loads and are not placed in $NS."
 	[ "$MODE" != headless ] || headless_notice

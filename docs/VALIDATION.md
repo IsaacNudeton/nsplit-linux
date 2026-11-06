@@ -18,7 +18,7 @@ The test environment was a disposable CachyOS guest using the documented
 systemd/Plasma-login-manager integration. Documentation-only changes do not
 extend the tested runtime scope.
 
-**This snapshot is 0.2.0-alpha.1**, which adds [headless profiles](#headless-profiles-020-alpha1) to 0.1.0-17 (everything below about 0.1.0-17 and earlier still describes the code those profiles share). 0.1.0-13 added the MIT license and its packaging only:
+**This snapshot is 0.2.0-alpha.2**, which adds [headless profiles](#headless-profiles-020-alpha1) (0.2.0-alpha.1) and the optional [host-SSH denial](#host-ssh-denial-020-alpha2) to 0.1.0-17 (everything below about 0.1.0-17 and earlier still describes the code those features share). 0.1.0-13 added the MIT license and its packaging only:
 building both packages and comparing them showed the 25 installed program files
 byte-identical, in content and mode, to the reviewed 0.1.0-12 package, and the only added
 file was `/usr/share/licenses/nsplit/LICENSE`. **0.1.0-14 is different: it changes
@@ -32,7 +32,8 @@ packages showed 31 installed files, exactly those two different) to fix #7 and #
 **0.1.0-17 changes three files relative to -16** (`bin/nsplit`, `cmd-add.sh` and `common.sh`; comparing the two packages showed 31 installed files, exactly those three different), for #17, see
 [below](#issue-17-fixed-in-0110-17).
 **0.2.0-alpha.1 changes four files relative to -17** (`cmd-add.sh`, `cmd-ops.sh`, `cmd-status.sh` and `common.sh`, which also carries the version string; comparing the two packages showed 31 installed files, exactly those four different, with the same modes), see
-[below](#headless-profiles-020-alpha1).
+[below](#headless-profiles-020-alpha1). **0.2.0-alpha.2 adds one file and changes five relative to alpha.1** (`cmd-hostssh.sh` is new; `bin/nsplit`, `cmd-add.sh`, `cmd-ops.sh`, `cmd-status.sh` and `common.sh` changed), see
+[below](#host-ssh-denial-020-alpha2).
 The guest tests of the fixes ran on the 0.1.0-12 baseline package, with the changed files
 copied over it (originals restored and checked afterwards). The -13 package was not installed.
 **The -14 package built from this repository (main 49ed71b) was installed over 0.1.0-12 in
@@ -392,6 +393,46 @@ the real end state and rerun; every check of the product passed.
 already had lingering before the add (refused by the preflight, tested off-host only); other systemd, OpenSSH, Tailscale or kernel versions; cron or `at` jobs, system services running as the user, and `sudo -u` or `su` from another account (the UID guard's documented limit);
 any GPU workload; sessions that do not end (an abandoned logind session needs `loginctl kill-session`, as the refusal says); a real workstation (nothing was installed on one); and independent review.
 
+### Host-SSH denial (0.2.0-alpha.2)
+
+**[#18](https://github.com/IsaacNudeton/nsplit-linux/issues/18): `--host-ssh deny --recovery-user ADMIN` and `nsplit host-ssh`.** *What it is:* an optional policy, never a default, that refuses a profile's user at the host's own `sshd` with one
+`DenyUsers` drop-in in `sshd_config.d`, so that the profile's own OpenSSH server over their tailnet is the only way in. It needs a recovery account (judged by `sshd -T`) and an authenticated SSH session of that account held open
+while it is applied, validates with `sshd -t` and `sshd -T`, reloads and never restarts sshd, and leaves the previous policy in force when anything fails; the design is in [Usage](USAGE.md#refusing-enrolled-users-at-the-hosts-own-sshd---host-ssh-deny-alpha)
+and [Security](../SECURITY.md).
+*Found by the guest prototype (each changed the product, each now has an off-host check that fails on the earlier code and a mutant):* (1) the policy was read from every profile record with a sourced record that inherits the
+running command's variables, so an add with the policy (which holds `HOSTSSH=deny`) put every OLDER profile, whose record has no such field, on the `DenyUsers` line: on the guest the three older profiles were refused at the host
+sshd although nobody had asked for it (`rec_clean` now forgets the record variables before any record is sourced; the same would have read `MANAGED=owner` of an add in progress as the policy of an older record that says
+nothing). (2) The held-session check was a pipeline whose status under `pipefail` is that of the last loop iteration, so a recovery account with a login session followed by its own manager session in logind's list was reported as
+having no session, although the same check had passed earlier when the sessions were listed the other way round. Neither could be seen off-host: the fake boxes only held records of the new format and a single session line.
+*Found by a review of the code before the final guest run (all but the first with a check that fails on the earlier code and a mutant):* values read from `sshd -T` are captured before they are searched (a pipeline ending in `grep -q` is a SIGPIPE race under `pipefail`; the race cannot be shown deterministically); the removal of the
+drop-in was not undoable (a failed reload after `allow` left the record saying "deny" and the drop-in gone); a signal during `deny` or `allow` was noted, announced as "undoing", and then swallowed; the record is now restored
+byte for byte.
+*Tested off-host:* 79 checks (a fake `systemctl`, `loginctl` and `tailscale`, **the real OpenSSH reading a box-local host configuration** with `sshd -t` and `sshd -T -C`): the preview and the options, one enrolled user (the drop-in is a header, the
+recovery account in a comment and one `DenyUsers` line; the main `sshd_config` byte-identical; one reload, never a restart; the held session record untouched), two users then one removed then the last (the aggregate follows the records,
+the drop-in goes with the last, its directory stays), thirteen refusals of the recovery account (does not exist, enrolled, being denied, no key and no password, no login shell, system account, expired, locked without PAM, not in
+`AllowUsers`, already denied, `AuthenticationMethods` not `any`, a missing key file, a key file with no valid key; an allowed password path is accepted, as a control), injected failures (an unreadable `sshd -T`, no `Include`, a malformed configuration, a drop-in that makes
+`sshd -t` fail, a failing reload at add and at remove, a hand-edited drop-in), status that never claims more than `sshd -T` said, `deny` and `allow` on an existing profile, an older-format record next to a policy profile (and a stray
+`HOSTSSH` in the caller's environment), both orders of logind's session list, a manager-only and a console-only session, and signals and a failing reload during `deny` and `allow`. The same checks fail 69 of 79 against the code
+without the feature (main at 0b13e94), and the 24 mutants that each remove one safeguard are each rejected by named checks. The older suites pass unchanged on the same tree: 403, 98, 46, 21, 30, 38, 89 and the 86 of the headless suite
+(the legacy-fixture suite `d2d3` runs its old-baseline box with the tree's own `bin/nsplit`, which it did not need before this release added a file that the baseline's does not load).
+*Tested in the disposable guest,* on the real package `nsplit-0.2.0alpha.2-1` (sha256 `e843a1378621f99f31d42ab0b83609bf7a3a69e74bd924552532af5e220c424b`, installed in place over 0.1.0-17, so it also installs the headless code; systemd 262.1,
+Tailscale 1.104.2, OpenSSH 10.6p1) with the same throwaway lab control server as above, and the method of the issue: three ordinary accounts (an enrolled target, a second enrolled user, a recovery administrator), positive controls
+before anything changes (each can log in at the host's sshd, in the host's network namespace), an authenticated recovery session held open through every change. A headless add with the policy while that session is held: the dry run
+changes nothing; the drop-in is exactly a header, the recovery account in a comment and one `DenyUsers` line, the main `sshd_config` untouched (`pacman -Qkk openssh` clean), the real OpenSSH agrees with `sshd -t` and `sshd -T`, sshd was
+reloaded and not restarted (same main process) and the held session survived; the node signed in, status Ready with the policy line passing, `nsplit host-ssh status` passing. Then a new login of the enrolled user at the host's sshd was
+**refused** with sshd's own log line (`not allowed because listed in DenyUsers`), a new login of the recovery account and of a user who is not enrolled **worked**, and the enrolled user was still reached by ordinary OpenSSH over their
+own tailnet, as themselves, inside their profile's namespace, through the profile's own PAM service; the profile's own sshd configuration carries no `DenyUsers` and does not include the host's drop-in directory. A second enrolled user, one removed (the list shrinks, only that user regains host SSH) and
+the last removed (the drop-in goes, the directory stays), all with the held session alive. Injected failures, each refused or undone with the previous policy in force and the guest's whole recorded state identical afterwards: a malformed host
+configuration, no `Include`, a failing reload, an unreadable `sshd -T`, a recovery account that is also denied elsewhere, a recovery account without a key, no held session. `deny` and `allow` on an existing profile change only the drop-in, the
+profile's record and the ownership list: the firewall (whole ruleset), the PAM files, the host keys, sshd's service definition and every profile daemon's PID are as before. **One real reboot with the policy installed:** the drop-in byte for
+byte, sshd running with it, the recovery account logging in, the enrolled user refused, the profile Ready again on its own and reached over its tailnet. Six complete guest runs: the first four each found a product bug (above) or a mistake of the
+test script, and are kept annotated; the fifth passed before the review round; the sixth, on the final package, ran everything including the reboot: 114 checks, 1 failed, that one being the test's own closing comparison, which
+differed by exactly the mount watcher and the host sshd that the test had enabled before taking its baseline and put back at the end (classified on the real end state and compared again without those units: identical).
+*Compared with 0.2.0-alpha.1,* the package has 32 installed files instead of 31: `cmd-hostssh.sh` is new, and `bin/nsplit`, `cmd-add.sh`, `cmd-ops.sh`, `cmd-status.sh` and `common.sh` changed (the same modes).
+*Not tested:* host `sshd` configurations other than the guest's (`AllowGroups`, `Match` blocks, `sshd.socket` activation, a different `Include` layout), other OpenSSH versions, a recovery account that is root or password-only, the recovery by
+deleting the drop-in and reloading by hand (the held session, `allow` and removal were each shown to hand host SSH back), more than two enrolled users in the guest, ways in other than the host's `sshd` (cron or `at` jobs, services
+running as the user, `su` or `sudo -u`), a real workstation, and independent review.
+
 ## Former known issues
 
 The focused test above, and a read-only inspection, found three problems. Each is fixed in
@@ -499,7 +540,7 @@ does not configure this.
 - The fixes of the three former issues were tested as changed files over the 0.1.0-12 baseline
   package; the 0.1.0-14 package built from this repository was exercised in the Tailscale SSH test, the
   0.1.0-15 package, upgraded in place from -14, for the fixes of #7 and #8 only, and the 0.1.0-16 package,
-  upgraded in place from -15, for the changes of #9 and #10 only, and the 0.1.0-17 package, upgraded in place from -16, for the change of #17 only, and the 0.2.0alpha.1 package, upgraded in place from -17, for headless profiles only. This documentation is
+  upgraded in place from -15, for the changes of #9 and #10 only, and the 0.1.0-17 package, upgraded in place from -16, for the change of #17 only, and the 0.2.0alpha.1 package, upgraded in place from -17, for headless profiles only, and the 0.2.0alpha.2 package, upgraded in place from -17, for the host-SSH denial (which includes the headless code) only. This documentation is
   not a claim that the package is ready for any particular deployment.
 - A fresh `nsplit add` on the final -12 guest package, a graphical desktop run on
   that package, or an installation on the real workstation was not demonstrated

@@ -8,7 +8,7 @@ ROOT=$(dirname "$(dirname "$SELF")")
 LIB=${NSPLIT_LIB:-$ROOT/lib/nsplit}; SHARE=${NSPLIT_SHARE:-$ROOT/share/nsplit}
 # shellcheck source=../lib/nsplit/common.sh
 . "$LIB/common.sh"
-for f in cmd-dns cmd-add cmd-login cmd-status cmd-ops cmd-mounts; do
+for f in cmd-dns cmd-add cmd-login cmd-status cmd-ops cmd-mounts cmd-hostssh; do
 	# shellcheck disable=SC1090
 	. "$LIB/$f.sh"
 done
@@ -26,6 +26,7 @@ nsplit: your profile, your network.
   nsplit uplinks         show or set which physical interfaces profile traffic may leave through
   nsplit reload          re-apply the firewall rules and forwarding (after changing uplinks)
   nsplit mounts          check (or repair) that the running services still see the profile's own resolv.conf and /run/tailscale
+  nsplit host-ssh        optional: refuse a profile's user at the host's own sshd (they keep their profile's OpenSSH over their tailnet), with a recovery account
   nsplit ts PROFILE ...  run the tailscale command against a profile's node
   nsplit run PROFILE -- COMMAND...   run a command inside a profile's network as that user
 
@@ -44,6 +45,7 @@ case $cmd in
 	uplinks) cmd_uplinks "$@";;
 	reload) cmd_reload "$@";;
 	mounts) cmd_mounts "$@";;
+	host-ssh) cmd_hostssh "$@";;
 	run) cmd_run "$@";;
 	ts) cmd_ts "$@";;
 	version|--version|-V) echo "nsplit $NSPLIT_VERSION";;
