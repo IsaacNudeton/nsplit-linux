@@ -1,7 +1,7 @@
 # Maintainer: Isaac Nudeton
 # Build:  make dist && cp nsplit-*.tar.gz packaging/arch/ && (cd packaging/arch && makepkg -f)
 pkgname=nsplit
-pkgver=0.2.0alpha.2
+pkgver=0.2.0alpha.3
 pkgrel=1
 pkgdesc='Per-profile Tailscale networking for shared Linux computers: each selected user gets their own network and tailnet'
 arch=(any)

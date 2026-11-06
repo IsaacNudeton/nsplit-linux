@@ -3,7 +3,7 @@
 # Sourced by bin/nsplit. Every path can be redirected with NSPLIT_* variables so the tool can be exercised against a scratch directory
 # and fake system commands without touching the machine (the defaults are the real locations).
 
-NSPLIT_VERSION=0.2.0-alpha.2
+NSPLIT_VERSION=0.2.0-alpha.3
 ETC=${NSPLIT_ETC:-/etc/nsplit}
 PROFDIR=$ETC/profiles
 CONF=$ETC/nsplit.conf
