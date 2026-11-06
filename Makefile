@@ -3,6 +3,8 @@ PREFIX ?= /usr
 DESTDIR ?=
 LIBDIR = $(PREFIX)/lib/nsplit
 VERSION = $(shell sed -n 's/^NSPLIT_VERSION=//p' lib/nsplit/common.sh)
+# pacman versions cannot contain a hyphen: 0.2.0-alpha.1 is packaged as 0.2.0alpha.1 (which sorts after 0.1.0 and before 0.2.0)
+PKGVER = $(subst -,,$(VERSION))
 HELPERS = nsplit-netns nsplit-fw nsplit-ufw nsplit-pam-gate nsplit-run nsplit-scoped nsplit-sockdir nsplit-mounts
 
 .PHONY: all check install dist
@@ -23,5 +25,5 @@ install:
 	install -m 755 lib/NetworkManager/dispatcher.d/90-nsplit-uplink $(DESTDIR)$(PREFIX)/lib/NetworkManager/dispatcher.d/90-nsplit-uplink
 
 dist: check
-	tar --transform 's|^|nsplit-$(VERSION)/|' --exclude-vcs --exclude='*.tar.*' --exclude='*.pkg.*' --exclude=packaging/arch/src --exclude=packaging/arch/pkg -czf nsplit-$(VERSION).tar.gz bin lib share LICENSE Makefile packaging/arch/PKGBUILD
-	@ls -l nsplit-$(VERSION).tar.gz
+	tar --transform 's|^|nsplit-$(PKGVER)/|' --exclude-vcs --exclude='*.tar.*' --exclude='*.pkg.*' --exclude=packaging/arch/src --exclude=packaging/arch/pkg -czf nsplit-$(PKGVER).tar.gz bin lib share LICENSE Makefile packaging/arch/PKGBUILD
+	@ls -l nsplit-$(PKGVER).tar.gz
