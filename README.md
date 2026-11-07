@@ -106,7 +106,7 @@ See [validation and limits](docs/VALIDATION.md) for exactly what was and was not
 
 ### Former known issues, fixed in this snapshot
 
-The focused test found three problems. Each is fixed in 0.1.0-14 (this snapshot is 0.2.0-alpha.3)
+The focused test found three problems. Each is fixed in 0.1.0-14 (this snapshot is 0.2.0-alpha.4)
 and its issue is closed. The fixes were tested off-host and in a disposable guest on the reviewed
 0.1.0-12 program files with the changed files copied over them. The 0.1.0-14 package built from
 this repository was later installed over 0.1.0-12 in a disposable guest for the Tailscale SSH test,

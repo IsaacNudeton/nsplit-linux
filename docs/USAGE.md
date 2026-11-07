@@ -28,14 +28,14 @@ do not weaken the check.
 ## Build the packaged snapshot
 
 This repository began as a single-commit snapshot of nsplit 0.1.0-13 and is now
-nsplit **0.2.0-alpha.3** (an alpha: see below). The reviewed runtime baseline, 0.1.0-12, is described in
+nsplit **0.2.0-alpha.4** (an alpha: see below). The reviewed runtime baseline, 0.1.0-12, is described in
 [VALIDATION.md](VALIDATION.md); the 0.1.0-13 package differed from it only by the added
 MIT license text, 0.1.0-14 adds the fixes for issues #1 to #3 (see
 [former known issues](VALIDATION.md#former-known-issues)), 0.1.0-15 the fixes for
 #7 and #8 (see [validation](VALIDATION.md#defects-7-and-8-fixed-in-010-15)), 0.1.0-16 the
 fixes for #9 and #10 (see [validation](VALIDATION.md#defect-10-fixed-in-010-16)), and 0.1.0-17 the
-fix for #17, the temporary files (see [validation](VALIDATION.md#issue-17-fixed-in-0110-17)). **0.2.0-alpha.1 adds headless profiles**, **0.2.0-alpha.2 the optional host-SSH denial** and **0.2.0-alpha.3 the shared-GPU setup command**, new features that have had no independent review (see
-[validation](VALIDATION.md#headless-profiles-020-alpha1), [validation](VALIDATION.md#host-ssh-denial-020-alpha2) and [validation](VALIDATION.md#shared-gpu-setup-020-alpha3)); pacman versions cannot contain a hyphen, so the package is called `0.2.0alpha.3` (it sorts after 0.2.0alpha.2, 0.2.0alpha.1 and 0.1.0-17 and before 0.2.0).
+fix for #17, the temporary files (see [validation](VALIDATION.md#issue-17-fixed-in-0110-17)). **0.2.0-alpha.1 adds headless profiles**, **0.2.0-alpha.2 the optional host-SSH denial** and **0.2.0-alpha.3 the shared-GPU setup command**, new features that have had no independent review; **0.2.0-alpha.4 is a fix to the included NetworkManager hook** (a re-applied uplink, see [validation](VALIDATION.md#networkmanager-hook-a-re-applied-uplink-020-alpha4)) (see
+[validation](VALIDATION.md#headless-profiles-020-alpha1), [validation](VALIDATION.md#host-ssh-denial-020-alpha2) and [validation](VALIDATION.md#shared-gpu-setup-020-alpha3)); pacman versions cannot contain a hyphen, so the package is called `0.2.0alpha.4` (it sorts after 0.2.0alpha.3, 0.2.0alpha.2, 0.2.0alpha.1 and 0.1.0-17 and before 0.2.0).
 The following creates a source checkout on a new evaluation machine. For an
 existing development checkout, use that checkout rather than creating duplicates.
 
@@ -44,7 +44,7 @@ git clone https://github.com/IsaacNudeton/nsplit-linux.git
 cd nsplit-linux
 make check
 make dist
-cp nsplit-0.2.0alpha.3.tar.gz packaging/arch/
+cp nsplit-0.2.0alpha.4.tar.gz packaging/arch/
 (cd packaging/arch && makepkg --syncdeps)
 ```
 
@@ -57,7 +57,7 @@ verification of an arbitrary downloaded archive.
 Install only the package you just built, in the evaluation VM:
 
 ```sh
-sudo pacman -U packaging/arch/nsplit-0.2.0alpha.3-1-any.pkg.tar.zst
+sudo pacman -U packaging/arch/nsplit-0.2.0alpha.4-1-any.pkg.tar.zst
 pacman -Q nsplit
 nsplit --version
 ```
