@@ -2,9 +2,11 @@
 # 90-nsplit-uplink : NetworkManager dispatcher hook (install as /etc/NetworkManager/dispatcher.d/90-nsplit-uplink, root:root 755).
 # nsplit forwards a namespace's traffic only on interfaces that have net.ipv4.conf.<if>.forwarding=1, set by `nsplit-fw up`. That flag belongs to the interface object: when an
 # uplink is recreated (Wi-Fi driver reset, hot-plug) it is back at the default (0) and the namespaces silently lose the internet while every nsplit unit still says "active".
+# `nmcli device reapply` resets that flag the same way WITHOUT recreating the interface and WITHOUT an `up` event: NetworkManager sends `reapply` instead (then dns-change and
+# dhcp4-change, which stay ignored). Reproduced on NetworkManager 1.58 (2026-11-07: a reapply of the Wi-Fi uplink took the jhuerta namespace off the internet for 8 hours).
 # This hook asks the firewall unit to RELOAD (the existing ExecReload = `nsplit-fw up` on loaded tables: atomic ruleset reload + forwarding re-assert; a failed reload keeps the
 # old rules and the recorded rollback values) -- and ONLY when a CURRENT-STATE check shows it is needed:
-#   * action is `up` and the interface is one of UPLINKS                              (anything else: exit 0, nothing asked)
+#   * action is `up` or `reapply` and the interface is one of UPLINKS                 (anything else: exit 0, nothing asked)
 #   * the interface exists NOW and is up NOW                                          (a late/obsolete event for a vanished or downed interface: nothing asked)
 #   * nsplit-firewall.service is `active` NOW                                         (a deliberately stopped, stopping, failed or never-started nsplit is never touched; a reload
 #                                                                                      cannot start a unit, and nothing here ever starts, stops or restarts anything)
@@ -18,19 +20,19 @@ ETC=${NSPLIT_ETC:-/etc/nsplit}; SYSTEMCTL=${NSPLIT_SYSTEMCTL:-systemctl}; LOGGER
 NFT=${NSPLIT_NFT:-nft}; SYSCTL_DIR=${NSPLIT_SYSCTL_DIR:-/proc/sys/net/ipv4/conf}
 iface=${1:-}; action=${2:-}
 log() { "$LOGGER" -t nsplit-uplink "$*" 2>/dev/null; }
-[ "$action" = up ] || exit 0
+case "$action" in up|reapply) ;; *) exit 0 ;; esac
 [ -n "$iface" ] || exit 0
 case "$iface" in */*|.*) exit 0 ;; esac
 uplinks=$( . "$ETC/nsplit.conf" 2>/dev/null && printf %s "$UPLINKS" ) || exit 0
 case " $uplinks " in *" $iface "*) ;; *) exit 0 ;; esac
-[ -d "$SYSNET/$iface" ] || { log "$iface up event is obsolete: the interface no longer exists; nothing done"; exit 0; }
-[ "$(cat "$SYSNET/$iface/operstate" 2>/dev/null)" = up ] || { log "$iface up event is obsolete: the interface is not up now; nothing done"; exit 0; }
+[ -d "$SYSNET/$iface" ] || { log "$iface $action event is obsolete: the interface no longer exists; nothing done"; exit 0; }
+[ "$(cat "$SYSNET/$iface/operstate" 2>/dev/null)" = up ] || { log "$iface $action event is obsolete: the interface is not up now; nothing done"; exit 0; }
 "$SYSTEMCTL" is-active --quiet nsplit-firewall.service || exit 0
-"$NFT" list table inet nsplit >/dev/null 2>&1 || { log "$iface up: nsplit-firewall says active but the nsplit tables are not loaded; NOT reloading (that would re-create the split); investigate"; exit 0; }
+"$NFT" list table inet nsplit >/dev/null 2>&1 || { log "$iface $action: nsplit-firewall says active but the nsplit tables are not loaded; NOT reloading (that would re-create the split); investigate"; exit 0; }
 [ "$(cat "$SYSCTL_DIR/$iface/forwarding" 2>/dev/null)" = 1 ] && exit 0
 if "$SYSTEMCTL" --no-block reload nsplit-firewall.service; then
-	log "$iface up with forwarding not in place: asked nsplit-firewall to reload (re-applies forwarding on the uplinks)"
+	log "$iface $action with forwarding not in place: asked nsplit-firewall to reload (re-applies forwarding on the uplinks)"
 else
-	log "$iface up: could not queue a reload of nsplit-firewall (namespaces may lack forwarding on $iface)"
+	log "$iface $action: could not queue a reload of nsplit-firewall (namespaces may lack forwarding on $iface)"
 fi
 exit 0

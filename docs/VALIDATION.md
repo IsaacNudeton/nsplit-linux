@@ -18,7 +18,7 @@ The test environment was a disposable CachyOS guest using the documented
 systemd/Plasma-login-manager integration. Documentation-only changes do not
 extend the tested runtime scope.
 
-**This snapshot is 0.2.0-alpha.3**, which adds [headless profiles](#headless-profiles-020-alpha1) (0.2.0-alpha.1), the optional [host-SSH denial](#host-ssh-denial-020-alpha2) (0.2.0-alpha.2) and the [shared-GPU setup command](#shared-gpu-setup-020-alpha3) to 0.1.0-17 (everything below about 0.1.0-17 and earlier still describes the code those features share). 0.1.0-13 added the MIT license and its packaging only:
+**This snapshot is 0.2.0-alpha.4**, which fixes one file of 0.2.0-alpha.3 (the [NetworkManager hook](#networkmanager-hook-a-re-applied-uplink-020-alpha4)) and, over 0.1.0-17, adds [headless profiles](#headless-profiles-020-alpha1) (0.2.0-alpha.1), the optional [host-SSH denial](#host-ssh-denial-020-alpha2) (0.2.0-alpha.2) and the [shared-GPU setup command](#shared-gpu-setup-020-alpha3) to 0.1.0-17 (everything below about 0.1.0-17 and earlier still describes the code those features share). 0.1.0-13 added the MIT license and its packaging only:
 building both packages and comparing them showed the 25 installed program files
 byte-identical, in content and mode, to the reviewed 0.1.0-12 package, and the only added
 file was `/usr/share/licenses/nsplit/LICENSE`. **0.1.0-14 is different: it changes
@@ -457,6 +457,23 @@ and the guest's recorded state identical to before. Two complete guest runs: the
 *Compared with 0.2.0-alpha.2,* the package has 33 installed files instead of 32: `cmd-setup.sh` is new, and `bin/nsplit` and `common.sh` changed.
 *Not tested:* a GPU of any kind, a driver, the device groups, or a workload; more than two users in one call in the guest (the off-host suite uses three names for the failure case); `--no-session-check` (only its refusal without `--recovery-user` is tested); a user who is already set up and skipped, in the
 guest (off-host only); an interrupt of the command itself (each add handles its own); a real workstation; and independent review.
+
+### NetworkManager hook: a re-applied uplink (0.2.0-alpha.4)
+
+*What was wrong.* The hook `90-nsplit-uplink` re-asserts the uplink's forwarding flag when NetworkManager reports `up` for it, because that flag belongs to the interface object and is back at 0 when the
+interface is recreated. NetworkManager resets the same flag when an administrator runs `nmcli device reapply IFACE` (for example after `nmcli connection modify ... connection.llmnr no`), but sends
+`reapply`, `dns-change` and `dhcp4-change` for that, never `up`. The hook ignored every action but `up`, so after a reapply of the Wi-Fi uplink the profiles had no internet and every nsplit unit still said "active".
+Seen on a real workstation on 2026-11-07: about 8 hours without the second user's Tailscale, until that user reconnected the Wi-Fi by hand (a real `up`, which made the hook reload the firewall).
+
+*Fix.* The hook acts on `up` and on `reapply`. Everything else about it is unchanged: the same current-state checks (uplink, interface up now, firewall unit active, tables loaded, forwarding not 1),
+the same reload, always exit 0. `dhcp4-change` and `dns-change` stay ignored.
+
+*Tested.* In the disposable guest, on its real NetworkManager 1.58.1 with the real uplink and the real firewall unit: with the 0.2.0-alpha.3 hook, `nmcli device reapply` took the uplink's forwarding to 0 and it stayed 0
+for the whole 15 seconds watched; with the new hook it was back at 1 immediately and the hook logged `reapply with forwarding not in place: asked nsplit-firewall to reload`. Off host: 17 checks of the hook
+(every action with forwarding 0 and 1, a non-uplink, an uplink that is down, an inactive firewall unit, unloaded tables, the log line), 0 failed, and the 0.2.0-alpha.3 hook is rejected on the 3 that need `reapply`;
+the earlier accepted tests of the hook, with real packets, pass unchanged (35, 37, 11 and 30 checks).
+*Not tested:* a Wi-Fi uplink (the guest's uplink is wired Ethernet), other NetworkManager versions, other ways of resetting the flag (a driver reset is the `up` case; anything else that rewrites the sysctl),
+and independent review.
 
 ## Former known issues
 
